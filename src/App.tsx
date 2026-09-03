@@ -1,11 +1,14 @@
 import { Leva } from "leva";
 import { Scene } from "./Scene";
+import { SceneErrorBoundary } from "./Status";
 import "./App.css";
 
 export default function App() {
   return (
     <div className="app">
-      <Scene />
+      <SceneErrorBoundary>
+        <Scene />
+      </SceneErrorBoundary>
       <header className="hud">
         <h1>Grok Bots · Physics Drop</h1>
         <p>Tap a bot to bounce it. Tap empty space to scatter the pile.</p>

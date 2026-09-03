@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import type * as THREE from "three";
+import * as THREE from "three";
 import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
 import { ContactShadows, Environment, Lightformer } from "@react-three/drei";
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
@@ -7,26 +7,30 @@ import { button, useControls } from "leva";
 import { Bot } from "./Bot";
 import { BOT_SIZE, getBotGeometries } from "./geometry";
 import { BOT_HUES, TOKENS } from "./data/tokens";
+import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./Status";
 
 /** Front-to-back thickness of the play space; keeps the pile readable. */
 const SLAB_DEPTH = 3.2;
 const FLOOR_Y = 0;
 const CAMERA_POS: [number, number, number] = [0, 4.5, 13];
 const CAMERA_TARGET: [number, number, number] = [0, 2.6, 0];
+const CAMERA_FOV = 42;
+const BACKGROUND = "#f7f5f1";
+const FLOOR_COLOR = "#e9e5de";
 
 type Spawn = {
   position: [number, number, number];
   rotation: [number, number, number];
 };
 
-function randomSpawns(count: number, halfWidth: number, faceCamera: boolean): Spawn[] {
+function randomSpawns(count: number, halfWidth: number, topY: number, faceCamera: boolean): Spawn[] {
   // Drop within a narrow column so the bots actually pile up rather than
   // landing in a row across the whole viewport.
-  const spread = Math.min(3, Math.max(0.5, halfWidth - BOT_SIZE));
+  const spread = Math.min(3, Math.max(0.3, halfWidth - BOT_SIZE));
   return Array.from({ length: count }, (_, i) => ({
     position: [
       (Math.random() * 2 - 1) * spread,
-      7 + i * 1.5 + Math.random() * 0.6,
+      topY + 1 + i * 1.5 + Math.random() * 0.6,
       faceCamera ? 0 : (Math.random() * 2 - 1) * (SLAB_DEPTH / 2 - BOT_SIZE * 0.5),
     ],
     rotation: [
@@ -37,16 +41,35 @@ function randomSpawns(count: number, halfWidth: number, faceCamera: boolean): Sp
   }));
 }
 
-/** Width of the visible world at the floor plane, so walls hug the viewport. */
-function useViewportHalfWidth() {
+/**
+ * Where the camera frustum meets the play plane (z = 0), for the current
+ * aspect ratio: half the visible width at the floor line, and the world y of
+ * the top edge of the viewport. Walls hug the former; spawns start above the
+ * latter so bots always fall into view.
+ */
+function useFrustumBounds() {
   const { camera, size } = useThree();
   return useMemo(() => {
-    const cam = camera as THREE.PerspectiveCamera;
-    const dist = Math.hypot(CAMERA_POS[2], CAMERA_POS[1] - 2);
-    const vFov = (cam.fov * Math.PI) / 180;
-    const height = 2 * Math.tan(vFov / 2) * dist;
-    const width = height * (size.width / size.height);
-    return Math.max(2.2, width / 2 - 0.15);
+    // Work on a copy with the aspect for this size applied, so the result is
+    // right even if r3f has not yet resized the live camera this frame.
+    const cam = (camera as THREE.PerspectiveCamera).clone();
+    cam.aspect = size.width / size.height;
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+
+    const floor = new THREE.Vector3(0, FLOOR_Y, 0).project(cam);
+    const hitPlaneZ0 = (ndcX: number, ndcY: number) => {
+      const a = new THREE.Vector3(ndcX, ndcY, -1).unproject(cam);
+      const b = new THREE.Vector3(ndcX, ndcY, 1).unproject(cam);
+      const t = (0 - a.z) / (b.z - a.z);
+      return a.lerp(b, t);
+    };
+    const right = hitPlaneZ0(1, floor.y);
+    const top = hitPlaneZ0(0, 1);
+    return {
+      halfWidth: Math.max(1.5, right.x - 0.3),
+      topY: Math.max(6, top.y),
+    };
   }, [camera, size.width, size.height]);
 }
 
@@ -59,12 +82,12 @@ type Settings = {
 };
 
 function World({ settings, generation }: { settings: Settings; generation: number }) {
-  const halfWidth = useViewportHalfWidth();
+  const { halfWidth, topY } = useFrustumBounds();
   const bots = useMemo(() => getBotGeometries(), []);
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
 
   const spawns = useMemo(
-    () => randomSpawns(bots.length, halfWidth, settings.faceCamera),
+    () => randomSpawns(bots.length, halfWidth, topY, settings.faceCamera),
     // Re-roll on respawn only; resizing the window shouldn't re-drop the pile.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [bots.length, generation],
@@ -115,20 +138,18 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
     [settings.impulse],
   );
 
-  const wallH = 40;
+  const wallH = 60;
   const wallT = 0.5;
 
   return (
     <Physics gravity={[0, -settings.gravity, 0]} timeStep={1 / 60}>
-      {/* Floor */}
+      {/* Floor and walls. Walls sit exactly at the viewport edges for this aspect ratio. */}
       <RigidBody type="fixed" friction={settings.friction} restitution={settings.restitution}>
-        <CuboidCollider args={[halfWidth + 4, wallT, SLAB_DEPTH]} position={[0, FLOOR_Y - wallT, 0]} />
-        {/* Left / right walls at the viewport edges */}
-        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[-halfWidth - wallT, wallH, 0]} />
-        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[halfWidth + wallT, wallH, 0]} />
-        {/* Front / back walls keep the pile in a shallow slab */}
-        <CuboidCollider args={[halfWidth + 4, wallH, wallT]} position={[0, wallH, -SLAB_DEPTH / 2 - wallT]} />
-        <CuboidCollider args={[halfWidth + 4, wallH, wallT]} position={[0, wallH, SLAB_DEPTH / 2 + wallT]} />
+        <CuboidCollider args={[halfWidth + 6, wallT, SLAB_DEPTH]} position={[0, FLOOR_Y - wallT, 0]} />
+        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[-halfWidth - wallT, wallH - 2, 0]} />
+        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[halfWidth + wallT, wallH - 2, 0]} />
+        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, -SLAB_DEPTH / 2 - wallT]} />
+        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, SLAB_DEPTH / 2 + wallT]} />
       </RigidBody>
 
       {bots.map((bot, i) => (
@@ -150,22 +171,52 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
 
       {/* Click-catcher for empty space: an invisible plane through the slab centre. */}
       <mesh position={[0, 12, 0]} onPointerDown={burst}>
-        <planeGeometry args={[200, 200]} />
+        <planeGeometry args={[400, 400]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-
-      {/* Visible floor */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, FLOOR_Y - 0.001, 0]} receiveShadow>
-        <planeGeometry args={[200, 200]} />
-        <meshStandardMaterial color="#f2f0ec" roughness={1} />
-      </mesh>
-      <ContactShadows position={[0, FLOOR_Y + 0.002, 0]} opacity={0.5} scale={40} blur={2.2} far={6} resolution={1024} color="#3a3530" />
     </Physics>
+  );
+}
+
+/** Everything that should be visible even if physics never loads. */
+function Stage() {
+  return (
+    <>
+      <color attach="background" args={[BACKGROUND]} />
+      <fog attach="fog" args={[BACKGROUND, 24, 70]} />
+      <hemisphereLight args={["#ffffff", "#d8d2c8", 0.7]} />
+      <directionalLight
+        position={[6, 12, 8]}
+        intensity={2.2}
+        castShadow
+        shadow-mapSize={[2048, 2048]}
+        shadow-bias={-0.0004}
+        shadow-camera-left={-16}
+        shadow-camera-right={16}
+        shadow-camera-top={16}
+        shadow-camera-bottom={-6}
+      />
+      <directionalLight position={[-8, 6, -4]} intensity={0.6} color="#dfe8ff" />
+      <Environment resolution={128}>
+        <Lightformer intensity={2} position={[0, 6, -6]} scale={[12, 4, 1]} />
+        <Lightformer intensity={1.2} position={[-8, 3, 4]} rotation-y={Math.PI / 2} scale={[8, 3, 1]} />
+        <Lightformer intensity={1} position={[8, 3, 4]} rotation-y={-Math.PI / 2} scale={[8, 3, 1]} color="#ffe9d6" />
+      </Environment>
+
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, FLOOR_Y - 0.001, 0]} receiveShadow>
+        <planeGeometry args={[400, 400]} />
+        <meshStandardMaterial color={FLOOR_COLOR} roughness={1} />
+      </mesh>
+      <ContactShadows position={[0, FLOOR_Y + 0.002, 0]} opacity={0.55} scale={50} blur={2.2} far={6} resolution={1024} color="#3a3530" />
+    </>
   );
 }
 
 export function Scene() {
   const [generation, setGeneration] = useState(0);
+  const webgl = useMemo(detectWebGL, []);
+  const rapier = useRapierReady();
+  const globalError = useGlobalErrors();
 
   const settings = useControls({
     gravity: { value: 12, min: 0, max: 40, step: 0.5 },
@@ -176,35 +227,43 @@ export function Scene() {
     Respawn: button(() => setGeneration((g) => g + 1)),
   });
 
-  return (
-    <Canvas
-      shadows
-      dpr={[1, 2]}
-      camera={{ position: CAMERA_POS, fov: 42, near: 0.1, far: 200 }}
-      onCreated={({ camera }) => camera.lookAt(...CAMERA_TARGET)}
-      style={{ touchAction: "none" }}
-    >
-      <color attach="background" args={["#f6f4f0"]} />
-      <fog attach="fog" args={["#f6f4f0", 22, 60]} />
-      <hemisphereLight args={["#ffffff", "#d8d2c8", 0.7]} />
-      <directionalLight
-        position={[6, 12, 8]}
-        intensity={2.2}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-bias={-0.0004}
-        shadow-camera-left={-14}
-        shadow-camera-right={14}
-        shadow-camera-top={14}
-        shadow-camera-bottom={-6}
+  if (!webgl.ok) {
+    return (
+      <StatusOverlay
+        status={{
+          kind: "error",
+          title: "WebGL is not available in this browser",
+          detail: webgl.detail,
+        }}
       />
-      <directionalLight position={[-8, 6, -4]} intensity={0.6} color="#dfe8ff" />
-      <Environment resolution={128}>
-        <Lightformer intensity={2} position={[0, 6, -6]} scale={[12, 4, 1]} />
-        <Lightformer intensity={1.2} position={[-8, 3, 4]} rotation-y={Math.PI / 2} scale={[8, 3, 1]} />
-        <Lightformer intensity={1} position={[8, 3, 4]} rotation-y={-Math.PI / 2} scale={[8, 3, 1]} color="#ffe9d6" />
-      </Environment>
-      <World settings={settings} generation={generation} />
-    </Canvas>
+    );
+  }
+
+  return (
+    <>
+      <Canvas
+        shadows
+        dpr={[1, 2]}
+        camera={{ position: CAMERA_POS, fov: CAMERA_FOV, near: 0.1, far: 200 }}
+        onCreated={({ camera }) => camera.lookAt(...CAMERA_TARGET)}
+        style={{ touchAction: "none" }}
+      >
+        <Stage />
+        {rapier.ready && <World settings={settings} generation={generation} />}
+      </Canvas>
+      {globalError ? (
+        <StatusOverlay
+          status={{
+            kind: "error",
+            title: /webgl/i.test(globalError) ? "WebGL context creation failed" : "Runtime error",
+            detail: globalError,
+          }}
+        />
+      ) : rapier.error ? (
+        <StatusOverlay status={{ kind: "error", title: "Physics engine (Rapier WASM) failed to load", detail: rapier.error }} />
+      ) : !rapier.ready ? (
+        <StatusOverlay status={{ kind: "loading", message: "Loading physics engine…" }} />
+      ) : null}
+    </>
   );
 }

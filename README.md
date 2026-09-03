@@ -33,6 +33,20 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
 
+## Troubleshooting
+
+If the title and panel render but the scene is blank, an on-screen card says
+which stage failed and prints diagnostics (WebGL renderer string, WebAssembly
+availability, viewport, user agent):
+
+- **WebGL is not available / WebGL context creation failed** — the browser has
+  WebGL or GPU access disabled. Cursor's built-in browser tab is known to do
+  this (`Sandboxed = yes … BindToCurrentSequence failed`). Open the URL in
+  Chrome, Safari or Firefox instead.
+- **Physics engine (Rapier WASM) failed to load** — WebAssembly compilation is
+  blocked (CSP or policy).
+- **Runtime error / The scene crashed** — a JavaScript error; the message is shown.
+
 ## Data sources
 
 Copied read-only from the Sand-Toolkit repo:
