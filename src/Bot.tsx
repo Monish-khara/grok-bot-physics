@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useCallback, useMemo, useRef } from "react";
 import * as THREE from "three";
 import {
   BallCollider,
@@ -20,10 +20,16 @@ type Props = {
   friction: number;
   /** Keep the face toward the camera: no depth travel, spin only about Z. */
   faceCamera: boolean;
+  /** Degrees of spin per pixel of drag, applied as angular velocity. */
+  dragSpin: number;
   onTap: (body: RapierRigidBody) => void;
 };
 
 const MAX_HULL_POINTS = 700;
+/** Pointer travel (px) below which a press counts as a tap, not a drag. */
+const TAP_SLOP = 6;
+/** Eyes are paper-coloured in the tool: they read as holes in the ink. */
+const EYE_COLOR = "#ffffff";
 
 /** Thin the mesh vertices so the hull builder gets a manageable cloud. */
 function sampleHullPoints(all: Float32Array): Float32Array {
@@ -40,31 +46,142 @@ function sampleHullPoints(all: Float32Array): Float32Array {
   return out.subarray(0, j);
 }
 
+type Drag = {
+  id: number;
+  x0: number;
+  y0: number;
+  x: number;
+  y: number;
+  moved: boolean;
+  /** Pose when the drag started; drag angles are applied on top of it. */
+  q0: THREE.Quaternion;
+  /** Last move delta and its timestamp, for the release flick. */
+  vx: number;
+  vy: number;
+  t: number;
+};
+
+const qYaw = new THREE.Quaternion();
+const qPitch = new THREE.Quaternion();
+const qOut = new THREE.Quaternion();
+const X_AXIS = new THREE.Vector3(1, 0, 0);
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, friction, faceCamera, onTap },
+  { bot, color, position, rotation, restitution, friction, faceCamera, dragSpin, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
+  const drag = useRef<Drag | null>(null);
+  const bodyRef = useRef<RapierRigidBody | null>(null);
+  // Keep our own handle and forward to whatever the parent passed (callback or object ref).
+  const setRef = useCallback(
+    (b: RapierRigidBody | null) => {
+      bodyRef.current = b;
+      if (typeof ref === "function") ref(b);
+      else if (ref) ref.current = b;
+    },
+    [ref],
+  );
 
   const hull = useMemo(() => {
     const pts = sampleHullPoints(bot.hullPoints);
     // Rapier returns null when it cannot build a hull (degenerate cloud).
-    // Probe once so complex outlines fall back to a box or ball instead of
+    // Probe once so odd bodies fall back to a box or ball instead of
     // silently having no collider at all.
     const desc = rapier.ColliderDesc.convexHull(pts);
     return desc ? pts : null;
   }, [bot, rapier]);
 
   // Flat ink fill, like the Base shapes v2 tool: unlit, exact token color.
-  const material = useMemo(
-    () => new THREE.MeshBasicMaterial({ color, toneMapped: false }),
-    [color],
+  const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
+  const eyeMaterial = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: EYE_COLOR,
+        toneMapped: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+    [],
   );
 
-  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
+  const body = () => bodyRef.current;
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
-    const body = (ref as React.RefObject<RapierRigidBody>).current;
-    if (body) onTap(body);
+    const b = body();
+    if (!b) return;
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const r = b.rotation();
+    drag.current = {
+      id: e.pointerId,
+      x0: e.clientX,
+      y0: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+      q0: new THREE.Quaternion(r.x, r.y, r.z, r.w),
+      vx: 0,
+      vy: 0,
+      t: performance.now(),
+    };
+  };
+
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    const d = drag.current;
+    const b = body();
+    if (!d || d.id !== e.pointerId || !b) return;
+    const now = performance.now();
+    const dt = Math.max(1, now - d.t) / 1000;
+    d.vx = (e.clientX - d.x) / dt;
+    d.vy = (e.clientY - d.y) / dt;
+    d.t = now;
+    d.x = e.clientX;
+    d.y = e.clientY;
+    if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < TAP_SLOP) return;
+    if (!d.moved) {
+      d.moved = true;
+      // Hold the bot in the air while it is being turned, like a tile in the tool.
+      b.setGravityScale(0, true);
+      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    }
+    // Tool: yaw follows horizontal drag, pitch follows vertical drag, at
+    // `dragSpin` degrees per pixel, applied on top of the pose at grab time.
+    const k = (dragSpin * Math.PI) / 180;
+    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    if (faceCamera) {
+      qYaw.setFromAxisAngle(Z_AXIS, -dx * k);
+      qOut.copy(qYaw).multiply(d.q0);
+    } else {
+      qYaw.setFromAxisAngle(Y_AXIS, dx * k);
+      qPitch.setFromAxisAngle(X_AXIS, dy * k);
+      qOut.copy(qPitch).multiply(qYaw).multiply(d.q0);
+    }
+    b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    b.setRotation({ x: qOut.x, y: qOut.y, z: qOut.z, w: qOut.w }, true);
+  };
+
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    const d = drag.current;
+    const b = body();
+    if (!d || d.id !== e.pointerId) return;
+    drag.current = null;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    if (!b) return;
+    if (d.moved) {
+      b.setGravityScale(1, true);
+      // Release flick: carry the last drag speed on as spin, capped.
+      const k = (dragSpin * Math.PI) / 180;
+      const cap = 12;
+      const wx = Math.max(-cap, Math.min(cap, d.vy * k));
+      const wy = Math.max(-cap, Math.min(cap, d.vx * k));
+      b.setAngvel(faceCamera ? { x: 0, y: 0, z: -wy } : { x: wx, y: wy, z: 0 }, true);
+    } else {
+      onTap(b);
+    }
   };
 
   const he = bot.halfExtents;
@@ -72,14 +189,14 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
 
   return (
     <RigidBody
-      ref={ref}
+      ref={setRef}
       colliders={false}
       position={position}
       rotation={rotation}
       restitution={restitution}
       friction={friction}
       linearDamping={0.15}
-      angularDamping={0.35}
+      angularDamping={1.4}
       enabledTranslations={[true, true, !faceCamera]}
       enabledRotations={[!faceCamera, !faceCamera, true]}
       ccd
@@ -92,7 +209,18 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       ) : (
         <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={friction} />
       )}
-      <mesh geometry={bot.geometry} material={material} onPointerDown={handlePointerDown} />
+      <mesh
+        geometry={bot.geometry}
+        material={material}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        {bot.eyes.map((g, i) => (
+          <mesh key={i} geometry={g} material={eyeMaterial} />
+        ))}
+      </mesh>
     </RigidBody>
   );
 });

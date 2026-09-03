@@ -1,15 +1,17 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type * as THREE from "three";
-import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
 import { button, useControls } from "leva";
 import { Bot } from "./Bot";
-import { BOT_SIZE, getBotGeometries } from "./geometry";
+import { getBotGeometries } from "./geometry";
 import { BOT_HUES, TOKENS } from "./data/tokens";
 import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./Status";
 
 /** Front-to-back thickness of the play space; keeps the pile readable. */
 const SLAB_DEPTH = 3.2;
+/** Typical bot diameter in world units, for spawn spacing. */
+const BOT_SIZE = 1.6;
 const FLOOR_Y = 0;
 /** World units visible top-to-bottom; width follows the aspect ratio. */
 const VIEW_HEIGHT = 10;
@@ -28,15 +30,16 @@ function randomSpawns(count: number, halfWidth: number, topY: number, faceCamera
   // Drop within a narrow column so the bots actually pile up rather than
   // landing in a row across the whole viewport.
   const spread = Math.min(3, Math.max(0.3, halfWidth - BOT_SIZE));
+  // Two staggered columns so the whole troop is in view within a second.
   return Array.from({ length: count }, (_, i) => ({
     position: [
-      (Math.random() * 2 - 1) * spread,
-      topY + 1 + i * 1.5 + Math.random() * 0.6,
+      (i % 2 === 0 ? -1 : 1) * (0.9 + Math.random() * spread),
+      topY + 0.5 + Math.floor(i / 2) * 1.8 + Math.random() * 0.4,
       faceCamera ? 0 : (Math.random() * 2 - 1) * (SLAB_DEPTH / 2 - BOT_SIZE * 0.5),
     ],
     rotation: [
-      faceCamera ? 0 : (Math.random() - 0.5) * 0.6,
-      faceCamera ? 0 : (Math.random() - 0.5) * 1.2,
+      faceCamera ? 0 : (Math.random() - 0.5) * 0.9,
+      faceCamera ? 0 : (Math.random() - 0.5) * 1.4,
       (Math.random() - 0.5) * 0.8,
     ],
   }));
@@ -74,12 +77,60 @@ type Settings = {
   friction: number;
   impulse: number;
   faceCamera: boolean;
+  dragSpin: number;
+  righting: number;
 };
+
+const tmpQ = new THREE.Quaternion();
+const tmpAxis = new THREE.Vector3();
+
+/**
+ * A soft weeble torque that swings each bot back toward its rest pose (face
+ * to the camera, eyes upright) after it tumbles. Rotation stays fully free —
+ * kicks and drags spin them in 3D — this only decides where they settle, so
+ * the eyes end up readable.
+ */
+function useRighting(
+  bodies: React.RefObject<(RapierRigidBody | null)[]>,
+  gain: number,
+  gravity: number,
+  enabled: boolean,
+) {
+  useFrame((_, dt) => {
+    if (!enabled || gain <= 0) return;
+    const g = Math.max(gravity, 4);
+    const step = Math.min(dt, 1 / 30);
+    for (const body of bodies.current ?? []) {
+      if (!body || body.gravityScale() === 0) continue; // being dragged
+      const r = body.rotation();
+      // Rotation that takes the current pose back to identity, as axis-angle.
+      tmpQ.set(-r.x, -r.y, -r.z, r.w);
+      if (tmpQ.w < 0) tmpQ.set(-tmpQ.x, -tmpQ.y, -tmpQ.z, -tmpQ.w);
+      const sinHalf = Math.hypot(tmpQ.x, tmpQ.y, tmpQ.z);
+      if (sinHalf < 0.02) continue;
+      const angle = 2 * Math.atan2(sinHalf, tmpQ.w);
+      tmpAxis.set(tmpQ.x / sinHalf, tmpQ.y / sinHalf, tmpQ.z / sinHalf);
+      // Torque scaled to the body's own weight and size, so it can tip a cube
+      // resting on a face (gravity moment ≈ m·g·r) but stays proportional
+      // for light or small bodies. Radius recovered from the inertia tensor.
+      const m = body.mass();
+      const inertia = body.principalInertia();
+      const radius = Math.sqrt(Math.max(inertia.x, inertia.y, inertia.z) / (0.4 * m));
+      const torque = angle * gain * m * g * radius * step;
+      body.applyTorqueImpulse({ x: tmpAxis.x * torque, y: tmpAxis.y * torque, z: tmpAxis.z * torque }, true);
+    }
+  });
+}
 
 function World({ settings, generation }: { settings: Settings; generation: number }) {
   const { halfWidth, topY } = useViewBounds();
   const bots = useMemo(() => getBotGeometries(), []);
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
+  useRighting(bodies, settings.righting, settings.gravity, !settings.faceCamera);
+  useEffect(() => {
+    // Test hook: lets headless checks know the bots are in the world.
+    (window as unknown as { __grokBotsReady?: boolean }).__grokBotsReady = true;
+  }, []);
 
   const spawns = useMemo(
     () => randomSpawns(bots.length, halfWidth, topY, settings.faceCamera),
@@ -160,6 +211,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
           restitution={settings.restitution}
           friction={settings.friction}
           faceCamera={settings.faceCamera}
+          dragSpin={settings.dragSpin}
           onTap={tap}
         />
       ))}
@@ -194,7 +246,9 @@ export function Scene() {
     restitution: { value: 0.35, min: 0, max: 1, step: 0.01, label: "bounce" },
     friction: { value: 0.6, min: 0, max: 1.5, step: 0.01 },
     impulse: { value: 9, min: 1, max: 30, step: 0.5, label: "impulse strength" },
-    faceCamera: { value: true, label: "face camera" },
+    dragSpin: { value: 0.35, min: 0.05, max: 1.5, step: 0.05, label: "drag spin" },
+    righting: { value: 1, min: 0, max: 3, step: 0.05, label: "face seeking" },
+    faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
   });
 
