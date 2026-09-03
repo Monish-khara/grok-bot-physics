@@ -35,23 +35,17 @@ export function buildBotGeometry(shape: BotShape): BotGeometry {
   const shapes = pathToShapes(shape.path);
   const unit = BOT_SIZE / SHAPE_BOX;
   const depth = BOT_SIZE * DEPTH_RATIO;
-  // A big bevel is what gives the puffy pillow read. It eats inward on
-  // concave shapes (sparkle, flower points), so keep it modest there.
-  const spiky = shape.id === "sparkle" || shape.id === "star6";
-  const bevel = (spiky ? 0.1 : 0.2) * BOT_SIZE;
-
+  // No bevel: seen straight on with a flat fill, the front silhouette must
+  // be the SVG outline itself. The extrusion only exists for the physics.
   const extruded = new THREE.ExtrudeGeometry(shapes, {
     depth: depth / unit,
-    bevelEnabled: true,
-    bevelThickness: bevel / unit,
-    bevelSize: (bevel * 0.85) / unit,
-    bevelSegments: 8,
+    bevelEnabled: false,
     curveSegments: 12,
     steps: 1,
   });
 
-  // Extrude output is non-indexed (flat shaded). Welding vertices lets the
-  // recomputed normals flow smoothly over the bevel, which is the pillow look.
+  // Extrude output is non-indexed; welding shrinks the vertex cloud the hull
+  // collider is built from.
   const geometry = mergeVertices(extruded, 1e-3) as THREE.ExtrudeGeometry;
   extruded.dispose();
 

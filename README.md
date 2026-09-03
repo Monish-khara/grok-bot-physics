@@ -1,10 +1,12 @@
 # Grok Bots · Physics Drop
 
-A standalone web prototype: the ten Grok Bot "Base shapes v2" bodies, extruded
-into soft 3D pillows in their brand colors, dropped into a physics box where they
-stack, settle, and can be poked around.
+A standalone web prototype: the ten Grok Bot "Base shapes v2" bodies as flat,
+solid-color silhouettes (matching the Sand-Toolkit tool's look: unlit ink fill on
+white, no shading or shadows), dropped into a physics box where they stack, settle,
+and can be poked around. The camera is orthographic and straight-on; the bodies
+are extruded only so Rapier has real 3D colliders.
 
-![Ten puffy bots settled on the floor](docs/screenshot.png)
+![Ten flat bots settled on the floor](docs/screenshot.png)
 
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
@@ -61,12 +63,13 @@ Copied read-only from the Sand-Toolkit repo:
 
 ## How it works
 
-- `src/geometry.ts` parses each path with three's `SVGLoader`, extrudes it with a
-  rounded bevel, welds vertices for smooth shading, flips SVG's y-down to y-up,
-  normalizes every body to the same footprint, and centres it.
+- `src/geometry.ts` parses each path with three's `SVGLoader`, extrudes it (no
+  bevel, so the front silhouette is exactly the SVG outline), flips SVG's y-down
+  to y-up, normalizes every body to the same footprint, and centres it. Bodies
+  use an unlit `MeshBasicMaterial` with the exact token hex.
 - `src/Bot.tsx` wraps each mesh in a Rapier `RigidBody` with a convex-hull
   collider built from a thinned copy of the mesh vertices. If Rapier cannot build
   a hull it falls back to a ball or box collider.
-- `src/Scene.tsx` sets up the floor, invisible walls at the viewport edges, a
-  shallow front/back slab, lighting, contact shadows, click handling and the Leva
-  panel.
+- `src/Scene.tsx` sets up an orthographic camera looking down -Z, an invisible
+  floor and walls at the viewport edges (derived from the view size), a shallow
+  front/back slab for 3D mode, click handling and the Leva panel.

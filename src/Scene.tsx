@@ -1,7 +1,6 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import * as THREE from "three";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type * as THREE from "three";
 import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
-import { ContactShadows, Environment, Lightformer } from "@react-three/drei";
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
 import { button, useControls } from "leva";
 import { Bot } from "./Bot";
@@ -12,11 +11,13 @@ import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./S
 /** Front-to-back thickness of the play space; keeps the pile readable. */
 const SLAB_DEPTH = 3.2;
 const FLOOR_Y = 0;
-const CAMERA_POS: [number, number, number] = [0, 4.5, 13];
-const CAMERA_TARGET: [number, number, number] = [0, 2.6, 0];
-const CAMERA_FOV = 42;
-const BACKGROUND = "#f7f5f1";
-const FLOOR_COLOR = "#e9e5de";
+/** World units visible top-to-bottom; width follows the aspect ratio. */
+const VIEW_HEIGHT = 10;
+/** Floor sits this far above the bottom edge of the viewport. */
+const FLOOR_PADDING = 0.6;
+const CAMERA_Y = FLOOR_Y - FLOOR_PADDING + VIEW_HEIGHT / 2;
+/** Stage colour of the Base shapes v2 tool (`--bg: 255 255 255`). */
+const BACKGROUND = "#ffffff";
 
 type Spawn = {
   position: [number, number, number];
@@ -42,35 +43,29 @@ function randomSpawns(count: number, halfWidth: number, topY: number, faceCamera
 }
 
 /**
- * Where the camera frustum meets the play plane (z = 0), for the current
- * aspect ratio: half the visible width at the floor line, and the world y of
- * the top edge of the viewport. Walls hug the former; spawns start above the
- * latter so bots always fall into view.
+ * Orthographic camera looking straight down -Z at the play plane. Zoom is set
+ * so VIEW_HEIGHT world units always fill the viewport height, whatever the
+ * aspect ratio, and the floor sits just above the bottom edge.
  */
-function useFrustumBounds() {
+function CameraRig() {
   const { camera, size } = useThree();
-  return useMemo(() => {
-    // Work on a copy with the aspect for this size applied, so the result is
-    // right even if r3f has not yet resized the live camera this frame.
-    const cam = (camera as THREE.PerspectiveCamera).clone();
-    cam.aspect = size.width / size.height;
+  useLayoutEffect(() => {
+    const cam = camera as THREE.OrthographicCamera;
+    cam.position.set(0, CAMERA_Y, 40);
+    cam.rotation.set(0, 0, 0);
+    cam.zoom = size.height / VIEW_HEIGHT;
     cam.updateProjectionMatrix();
-    cam.updateMatrixWorld();
+  }, [camera, size.height]);
+  return null;
+}
 
-    const floor = new THREE.Vector3(0, FLOOR_Y, 0).project(cam);
-    const hitPlaneZ0 = (ndcX: number, ndcY: number) => {
-      const a = new THREE.Vector3(ndcX, ndcY, -1).unproject(cam);
-      const b = new THREE.Vector3(ndcX, ndcY, 1).unproject(cam);
-      const t = (0 - a.z) / (b.z - a.z);
-      return a.lerp(b, t);
-    };
-    const right = hitPlaneZ0(1, floor.y);
-    const top = hitPlaneZ0(0, 1);
-    return {
-      halfWidth: Math.max(1.5, right.x - 0.3),
-      topY: Math.max(6, top.y),
-    };
-  }, [camera, size.width, size.height]);
+/** Visible half-width at the play plane and the world y of the top edge. */
+function useViewBounds() {
+  const { size } = useThree();
+  return useMemo(() => {
+    const halfWidth = (VIEW_HEIGHT / 2) * (size.width / size.height);
+    return { halfWidth: Math.max(1.5, halfWidth - 0.05), topY: CAMERA_Y + VIEW_HEIGHT / 2 };
+  }, [size.width, size.height]);
 }
 
 type Settings = {
@@ -82,7 +77,7 @@ type Settings = {
 };
 
 function World({ settings, generation }: { settings: Settings; generation: number }) {
-  const { halfWidth, topY } = useFrustumBounds();
+  const { halfWidth, topY } = useViewBounds();
   const bots = useMemo(() => getBotGeometries(), []);
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
 
@@ -170,7 +165,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
       ))}
 
       {/* Click-catcher for empty space: an invisible plane through the slab centre. */}
-      <mesh position={[0, 12, 0]} onPointerDown={burst}>
+      <mesh position={[0, 12, -6]} onPointerDown={burst}>
         <planeGeometry args={[400, 400]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
@@ -178,36 +173,12 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
   );
 }
 
-/** Everything that should be visible even if physics never loads. */
+/** The stage is just the tool's white paper: no lights, no floor, no shadows. */
 function Stage() {
   return (
     <>
       <color attach="background" args={[BACKGROUND]} />
-      <fog attach="fog" args={[BACKGROUND, 24, 70]} />
-      <hemisphereLight args={["#ffffff", "#d8d2c8", 0.7]} />
-      <directionalLight
-        position={[6, 12, 8]}
-        intensity={2.2}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-bias={-0.0004}
-        shadow-camera-left={-16}
-        shadow-camera-right={16}
-        shadow-camera-top={16}
-        shadow-camera-bottom={-6}
-      />
-      <directionalLight position={[-8, 6, -4]} intensity={0.6} color="#dfe8ff" />
-      <Environment resolution={128}>
-        <Lightformer intensity={2} position={[0, 6, -6]} scale={[12, 4, 1]} />
-        <Lightformer intensity={1.2} position={[-8, 3, 4]} rotation-y={Math.PI / 2} scale={[8, 3, 1]} />
-        <Lightformer intensity={1} position={[8, 3, 4]} rotation-y={-Math.PI / 2} scale={[8, 3, 1]} color="#ffe9d6" />
-      </Environment>
-
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, FLOOR_Y - 0.001, 0]} receiveShadow>
-        <planeGeometry args={[400, 400]} />
-        <meshStandardMaterial color={FLOOR_COLOR} roughness={1} />
-      </mesh>
-      <ContactShadows position={[0, FLOOR_Y + 0.002, 0]} opacity={0.55} scale={50} blur={2.2} far={6} resolution={1024} color="#3a3530" />
+      <CameraRig />
     </>
   );
 }
@@ -242,10 +213,10 @@ export function Scene() {
   return (
     <>
       <Canvas
-        shadows
+        flat
+        orthographic
         dpr={[1, 2]}
-        camera={{ position: CAMERA_POS, fov: CAMERA_FOV, near: 0.1, far: 200 }}
-        onCreated={({ camera }) => camera.lookAt(...CAMERA_TARGET)}
+        camera={{ position: [0, CAMERA_Y, 40], near: 0.1, far: 100 }}
         style={{ touchAction: "none" }}
       >
         <Stage />

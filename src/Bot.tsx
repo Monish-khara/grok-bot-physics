@@ -55,17 +55,9 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
     return desc ? pts : null;
   }, [bot, rapier]);
 
+  // Flat ink fill, like the Base shapes v2 tool: unlit, exact token color.
   const material = useMemo(
-    () =>
-      new THREE.MeshPhysicalMaterial({
-        color,
-        roughness: 0.42,
-        metalness: 0,
-        clearcoat: 0.35,
-        clearcoatRoughness: 0.5,
-        sheen: 0.4,
-        sheenColor: new THREE.Color(color).lerp(new THREE.Color("#ffffff"), 0.4),
-      }),
+    () => new THREE.MeshBasicMaterial({ color, toneMapped: false }),
     [color],
   );
 
@@ -100,13 +92,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       ) : (
         <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={friction} />
       )}
-      <mesh
-        geometry={bot.geometry}
-        material={material}
-        castShadow
-        receiveShadow
-        onPointerDown={handlePointerDown}
-      />
+      <mesh geometry={bot.geometry} material={material} onPointerDown={handlePointerDown} />
     </RigidBody>
   );
 });
