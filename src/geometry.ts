@@ -10,8 +10,12 @@ export const WORLD_PER_BODY = 0.68;
 const RESOLUTION = 64;
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
 const GRID_SCALE = 0.78;
-/** How far eyes float above the surface, in body units. */
-const EYE_LIFT = 0.012;
+/**
+ * How far eyes float above the surface, in body units. Must clear the
+ * marching-cubes discretisation error (about half a grid cell, ~0.02 body
+ * units at RESOLUTION 64) or the faceted body pokes through the pill.
+ */
+const EYE_LIFT = 0.05;
 
 type Sdf = (x: number, y: number, z: number) => number;
 
@@ -215,7 +219,7 @@ function stadium(width: number, height: number, segments = 14): Pt2[] {
  */
 function eyeGeometry(sdf: Sdf, cx: number, cy: number, width: number, height: number): THREE.BufferGeometry {
   const outline = stadium(width, height);
-  const rings = 3;
+  const rings = 5;
   const verts: number[] = [];
   const index: number[] = [];
 

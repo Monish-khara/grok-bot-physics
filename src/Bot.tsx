@@ -102,8 +102,8 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         color: EYE_COLOR,
         toneMapped: false,
         polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -2,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
       }),
     [],
   );
@@ -218,7 +218,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         onPointerCancel={onPointerUp}
       >
         {bot.eyes.map((g, i) => (
-          <mesh key={i} geometry={g} material={eyeMaterial} />
+          <mesh key={i} geometry={g} material={eyeMaterial} renderOrder={1} />
         ))}
       </mesh>
     </RigidBody>
