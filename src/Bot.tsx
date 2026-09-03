@@ -18,6 +18,8 @@ type Props = {
   rotation: [number, number, number];
   restitution: number;
   friction: number;
+  /** Keep the face toward the camera: no depth travel, spin only about Z. */
+  faceCamera: boolean;
   onTap: (body: RapierRigidBody) => void;
 };
 
@@ -39,7 +41,7 @@ function sampleHullPoints(all: Float32Array): Float32Array {
 }
 
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, friction, onTap },
+  { bot, color, position, rotation, restitution, friction, faceCamera, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
@@ -86,6 +88,9 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       friction={friction}
       linearDamping={0.15}
       angularDamping={0.35}
+      enabledTranslations={[true, true, !faceCamera]}
+      enabledRotations={[!faceCamera, !faceCamera, true]}
+      ccd
       canSleep
     >
       {hull ? (

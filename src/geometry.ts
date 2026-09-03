@@ -1,11 +1,12 @@
 import * as THREE from "three";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { SHAPES, SHAPE_BOX, type BotShape } from "./data/shapes";
 
 /** World-space size of a bot's longest side. */
 export const BOT_SIZE = 1.6;
 /** Extrusion depth as a fraction of BOT_SIZE. */
-const DEPTH_RATIO = 0.48;
+const DEPTH_RATIO = 0.34;
 
 export type BotGeometry = {
   shape: BotShape;
@@ -26,7 +27,7 @@ function pathToShapes(d: string): THREE.Shape[] {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SHAPE_BOX} ${SHAPE_BOX}"><path d="${d}"/></svg>`;
   const parsed = loader.parse(svg);
   const shapes: THREE.Shape[] = [];
-  for (const p of parsed.paths) shapes.push(...SVGLoader.createShapes(p));
+  for (const p of parsed.paths) shapes.push(...p.toShapes());
   return shapes;
 }
 
@@ -37,19 +38,27 @@ export function buildBotGeometry(shape: BotShape): BotGeometry {
   // A big bevel is what gives the puffy pillow read. It eats inward on
   // concave shapes (sparkle, flower points), so keep it modest there.
   const spiky = shape.id === "sparkle" || shape.id === "star6";
-  const bevel = (spiky ? 0.09 : 0.16) * BOT_SIZE;
+  const bevel = (spiky ? 0.1 : 0.2) * BOT_SIZE;
 
-  const geometry = new THREE.ExtrudeGeometry(shapes, {
+  const extruded = new THREE.ExtrudeGeometry(shapes, {
     depth: depth / unit,
     bevelEnabled: true,
     bevelThickness: bevel / unit,
     bevelSize: (bevel * 0.85) / unit,
-    bevelSegments: 6,
-    curveSegments: 10,
+    bevelSegments: 8,
+    curveSegments: 12,
     steps: 1,
   });
 
-  geometry.scale(unit, -unit, unit);
+  // Extrude output is non-indexed (flat shaded). Welding vertices lets the
+  // recomputed normals flow smoothly over the bevel, which is the pillow look.
+  const geometry = mergeVertices(extruded, 1e-3) as THREE.ExtrudeGeometry;
+  extruded.dispose();
+
+  // SVG is y-down. A half-turn about X flips y while keeping the winding
+  // right-handed (a plain negative scale would turn the mesh inside out).
+  geometry.rotateX(Math.PI);
+  geometry.scale(unit, unit, unit);
   geometry.computeBoundingBox();
   const bb = geometry.boundingBox!;
   const size = new THREE.Vector3();

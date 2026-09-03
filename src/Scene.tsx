@@ -19,18 +19,20 @@ type Spawn = {
   rotation: [number, number, number];
 };
 
-function randomSpawns(count: number, halfWidth: number): Spawn[] {
-  const spread = Math.max(0.5, halfWidth - BOT_SIZE);
+function randomSpawns(count: number, halfWidth: number, faceCamera: boolean): Spawn[] {
+  // Drop within a narrow column so the bots actually pile up rather than
+  // landing in a row across the whole viewport.
+  const spread = Math.min(3, Math.max(0.5, halfWidth - BOT_SIZE));
   return Array.from({ length: count }, (_, i) => ({
     position: [
       (Math.random() * 2 - 1) * spread,
-      8 + i * 1.9 + Math.random() * 0.8,
-      (Math.random() * 2 - 1) * (SLAB_DEPTH / 2 - BOT_SIZE * 0.5),
+      7 + i * 1.5 + Math.random() * 0.6,
+      faceCamera ? 0 : (Math.random() * 2 - 1) * (SLAB_DEPTH / 2 - BOT_SIZE * 0.5),
     ],
     rotation: [
-      (Math.random() - 0.5) * 0.6,
-      (Math.random() - 0.5) * 1.2,
-      (Math.random() - 0.5) * 0.6,
+      faceCamera ? 0 : (Math.random() - 0.5) * 0.6,
+      faceCamera ? 0 : (Math.random() - 0.5) * 1.2,
+      (Math.random() - 0.5) * 0.8,
     ],
   }));
 }
@@ -53,6 +55,7 @@ type Settings = {
   restitution: number;
   friction: number;
   impulse: number;
+  faceCamera: boolean;
 };
 
 function World({ settings, generation }: { settings: Settings; generation: number }) {
@@ -61,7 +64,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
 
   const spawns = useMemo(
-    () => randomSpawns(bots.length, halfWidth),
+    () => randomSpawns(bots.length, halfWidth, settings.faceCamera),
     // Re-roll on respawn only; resizing the window shouldn't re-drop the pile.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [bots.length, generation],
@@ -116,7 +119,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
   const wallT = 0.5;
 
   return (
-    <Physics gravity={[0, -settings.gravity, 0]} timeStep="vary">
+    <Physics gravity={[0, -settings.gravity, 0]} timeStep={1 / 60}>
       {/* Floor */}
       <RigidBody type="fixed" friction={settings.friction} restitution={settings.restitution}>
         <CuboidCollider args={[halfWidth + 4, wallT, SLAB_DEPTH]} position={[0, FLOOR_Y - wallT, 0]} />
@@ -140,6 +143,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
           rotation={spawns[i].rotation}
           restitution={settings.restitution}
           friction={settings.friction}
+          faceCamera={settings.faceCamera}
           onTap={tap}
         />
       ))}
@@ -168,6 +172,7 @@ export function Scene() {
     restitution: { value: 0.35, min: 0, max: 1, step: 0.01, label: "bounce" },
     friction: { value: 0.6, min: 0, max: 1.5, step: 0.01 },
     impulse: { value: 9, min: 1, max: 30, step: 0.5, label: "impulse strength" },
+    faceCamera: { value: true, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
   });
 
