@@ -17,15 +17,17 @@ const RESOLUTION = 128;
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
 const GRID_SCALE = 0.78;
 /** Segments around the axis for surfaces of revolution and the capsule. */
-const RADIAL_SEGMENTS = 128;
+const RADIAL_SEGMENTS = 192;
 /** Cross-section levels through a loft, pole to pole. */
 const LOFT_LEVELS = 72;
 /**
- * How far eyes float above the surface, in body units. Enough to clear the
- * small mismatch between the analytic mesh and the SDF used to drape them
- * (a few thousandths of a body unit) with margin for the depth test.
+ * Eyes are solid pills set into the body along the local normal: most of the
+ * slab sits below the surface (so no body colour can show through and no
+ * depth tricks are needed) and a thin lip stands proud of it, like a carved
+ * inlay. Body units.
  */
-const EYE_LIFT = 0.05;
+const EYE_ABOVE = 0.025;
+const EYE_BELOW = 0.04;
 /** Resolution and half-extent (body units) of the cached 2D outline SDFs. */
 const SDF_GRID = 256;
 const SDF_EXTENT = 1.3;
@@ -144,38 +146,118 @@ function bodySdf(def: BodyDef): Sdf {
 
 // ── Body surfaces, in body units ─────────────────────────────────────────────
 
+/** Ends narrower than this are pointed tips (the tool's revolve uses 0.06 on a denser outline). */
+const POINTED_CAP_RADIUS = 0.3;
+
+/**
+ * Least-squares local quadratic (Savitzky–Golay style) fit of radius over y,
+ * evaluated at each sample; one-sided windows at the ends. Removes the dump's
+ * sampling dither without flattening curvature the way a wide blur would.
+ */
+function localQuadratic(profile: readonly Pt2[], halfWindow: number): number[] {
+  const n = profile.length;
+  return profile.map(([, y0], i) => {
+    const lo = Math.max(0, i - halfWindow), hi = Math.min(n - 1, i + halfWindow);
+    // Normal equations for r = a + b t + c t², t = y - y0.
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, r0 = 0, r1 = 0, r2 = 0;
+    for (let k = lo; k <= hi; k++) {
+      const [r, y] = profile[k];
+      const t = y - y0, t2 = t * t;
+      s0 += 1; s1 += t; s2 += t2; s3 += t2 * t; s4 += t2 * t2;
+      r0 += r; r1 += r * t; r2 += r * t2;
+    }
+    const det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
+    if (Math.abs(det) < 1e-12) return profile[i][0];
+    // Cramer's rule for `a` (the value at t = 0).
+    const a = (r0 * (s2 * s4 - s3 * s3) - s1 * (r1 * s4 - s3 * r2) + s2 * (r1 * s3 - s2 * r2)) / det;
+    return Math.max(0, a);
+  });
+}
+
+/**
+ * Round off a pointed end with the sphere cap tangent to the profile there:
+ * the circle through the end point whose centre sits on the axis along the
+ * profile normal. C1 join, apex on the axis. Returns the arc from just past
+ * the end point to the apex, or null if the end is a flat rim.
+ */
+function tangentCap(r0: number, y0: number, slope: number, dir: 1 | -1): Pt2[] | null {
+  // `dir` is +1 at the top end (profile heads up), -1 at the bottom.
+  if (r0 >= POINTED_CAP_RADIUS || slope * dir >= 0 || !isFinite(slope)) return null;
+  const yc = y0 + slope * r0;
+  const R = r0 * Math.sqrt(1 + slope * slope);
+  const theta0 = Math.atan2(r0, (y0 - yc) * dir);
+  const steps = 12;
+  const out: Pt2[] = [];
+  for (let k = 1; k <= steps; k++) {
+    // Cosine spacing crowds samples toward the join, where curvature changes.
+    const theta = theta0 * (1 - Math.sin((Math.PI / 2) * (k / steps)));
+    out.push([R * Math.sin(theta), yc + dir * R * Math.cos(theta)]);
+  }
+  return out;
+}
+
 /**
  * The dumped profiles were resampled to even y steps, which left the radii
- * dithering by ~0.01 body units from point to point (about a pixel at 2x).
- * Two passes of a [1 2 1]/4 filter on the radius kill that alternation
- * exactly, then a centripetal Catmull-Rom resample gives an even, dense
- * curve. Endpoints (the flat caps) are kept as they are.
+ * dithering by ~0.01 body units from point to point (about a pixel at 2x),
+ * and truncated pointed tips at r ≈ 0.11 (the tool closes those to an axis
+ * point with a rounded taper). Refit: local quadratic smoothing, a unimodal
+ * monotone radius (no ripples up the tip), centripetal Catmull-Rom resample,
+ * then tangent sphere caps on the pointed ends. Flat rims (the wedge base)
+ * are kept.
  */
 function smoothProfile(profile: readonly Pt2[]): Pt2[] {
-  let r = profile.map(([radius]) => radius);
-  for (let pass = 0; pass < 2; pass++) {
-    r = r.map((v, i) => (i === 0 || i === r.length - 1 ? v : (r[i - 1] + 2 * v + r[i + 1]) / 4));
-  }
+  const r = localQuadratic(profile, 4);
+  // A body of revolution here is widest once; radius must fall monotonically
+  // toward both ends or the silhouette ripples at grazing angles.
+  let peak = 0;
+  for (let i = 1; i < r.length; i++) if (r[i] > r[peak]) peak = i;
+  for (let i = peak + 1; i < r.length; i++) r[i] = Math.min(r[i], r[i - 1]);
+  for (let i = peak - 1; i >= 0; i--) r[i] = Math.min(r[i], r[i + 1]);
+
   const curve = new THREE.CatmullRomCurve3(
     r.map((radius, i) => new THREE.Vector3(radius, profile[i][1], 0)),
     false,
     "centripetal",
   );
-  return curve.getPoints(profile.length * 3).map((p) => [Math.max(0, p.x), p.y] as Pt2);
+  const body = curve.getPoints(profile.length * 4).map((p) => [Math.max(0, p.x), p.y] as Pt2);
+
+  const first = body[0], second = body[1];
+  const last = body[body.length - 1], prev = body[body.length - 2];
+  const bottom = tangentCap(first[0], first[1], (second[0] - first[0]) / (second[1] - first[1]), -1) ?? [];
+  const top = tangentCap(last[0], last[1], (last[0] - prev[0]) / (last[1] - prev[1]), 1) ?? [];
+  return [...bottom.reverse(), ...body, ...top];
+}
+
+/** Drop triangles that reference the same vertex twice (lathe apex slivers). */
+function dropDegenerateTriangles(g: THREE.BufferGeometry) {
+  const idx = g.getIndex();
+  if (!idx) return;
+  const kept: number[] = [];
+  for (let i = 0; i < idx.count; i += 3) {
+    const a = idx.getX(i), b = idx.getX(i + 1), c = idx.getX(i + 2);
+    if (a !== b && b !== c && a !== c) kept.push(a, b, c);
+  }
+  g.setIndex(kept);
 }
 
 /**
- * Surface of revolution straight from the tool's profile curve (radius, y),
- * bottom to top, closed onto the axis at both ends. Exact silhouette at any
- * zoom — no voxel steps.
+ * Surface of revolution from the (refitted) profile curve (radius, y), bottom
+ * to top, closed onto the axis at both ends. Exact silhouette at any zoom —
+ * no voxel steps. Apex and seam vertices are merged so the tip is one point.
  */
 function latheBody(profile: readonly Pt2[]): THREE.BufferGeometry {
   const pts = [
     new THREE.Vector2(0, profile[0][1]),
-    ...profile.map(([r, y]) => new THREE.Vector2(r, y)),
+    ...profile.filter(([r]) => r > 1e-6).map(([r, y]) => new THREE.Vector2(r, y)),
     new THREE.Vector2(0, profile[profile.length - 1][1]),
   ];
-  return new THREE.LatheGeometry(pts, RADIAL_SEGMENTS);
+  const lathe = new THREE.LatheGeometry(pts, RADIAL_SEGMENTS);
+  lathe.deleteAttribute("uv");
+  lathe.deleteAttribute("normal");
+  const merged = mergeVertices(lathe, 1e-5);
+  lathe.dispose();
+  dropDegenerateTriangles(merged);
+  return merged;
 }
 
 /**
@@ -352,76 +434,61 @@ function stadium(width: number, height: number, segments = 24): Pt2[] {
   return pts;
 }
 
+/** First surface hit along -z from the front, in body units, with its outward normal. */
+function frontSurface(sdf: Sdf, x: number, y: number): { p: THREE.Vector3; n: THREE.Vector3 } {
+  let z = 1.6;
+  let hitZ = 0;
+  for (let i = 0; i < 64; i++) {
+    const nz = z - 0.05;
+    if (sdf(x, y, nz) <= 0) {
+      // Refine the crossing.
+      let lo = nz, hi = z;
+      for (let k = 0; k < 10; k++) {
+        const mid = (lo + hi) / 2;
+        if (sdf(x, y, mid) <= 0) lo = mid;
+        else hi = mid;
+      }
+      hitZ = (lo + hi) / 2;
+      break;
+    }
+    z = nz;
+    if (nz < -1.6) break;
+  }
+  const e = 0.01;
+  const n = new THREE.Vector3(
+    sdf(x + e, y, hitZ) - sdf(x - e, y, hitZ),
+    sdf(x, y + e, hitZ) - sdf(x, y - e, hitZ),
+    sdf(x, y, hitZ + e) - sdf(x, y, hitZ - e),
+  ).normalize();
+  if (n.lengthSq() < 0.5) n.set(0, 0, 1);
+  return { p: new THREE.Vector3(x, y, hitZ), n };
+}
+
 /**
- * A pill draped onto the body: every vertex is pushed along +z until it meets
- * the surface, then lifted a hair off it. That is how the tool charts its eyes
- * on the body surface, so they turn with the volume instead of floating.
+ * A solid pill set into the body: a stadium extruded along the surface normal
+ * at the eye centre, sunk EYE_BELOW into the volume and standing EYE_ABOVE
+ * proud of it. Being a real volume that intersects the body, the ordinary
+ * depth test does the rest — the body hides the buried part and the whole eye
+ * once the face turns away — with no lift or polygon offset.
  */
 function eyeGeometry(sdf: Sdf, cx: number, cy: number, width: number, height: number): THREE.BufferGeometry {
+  const { p, n } = frontSurface(sdf, cx, cy);
   const outline = stadium(width, height);
-  const rings = 5;
-  const verts: number[] = [];
-  const index: number[] = [];
-
-  const surfaceZ = (x: number, y: number) => {
-    let z = 1.6;
-    let prev = sdf(x, y, z);
-    for (let i = 0; i < 64; i++) {
-      const nz = z - 0.05;
-      const d = sdf(x, y, nz);
-      if (d <= 0) {
-        // Refine the crossing.
-        let lo = nz, hi = z;
-        for (let k = 0; k < 8; k++) {
-          const mid = (lo + hi) / 2;
-          if (sdf(x, y, mid) <= 0) lo = mid;
-          else hi = mid;
-        }
-        return (lo + hi) / 2;
-      }
-      z = nz;
-      prev = d;
-      if (nz < -1.6) break;
-    }
-    void prev;
-    return 0;
-  };
-
-  const push = (x: number, y: number) => {
-    const z = surfaceZ(x, y);
-    const e = 0.01;
-    const nx = sdf(x + e, y, z) - sdf(x - e, y, z);
-    const ny = sdf(x, y + e, z) - sdf(x, y - e, z);
-    const nz = sdf(x, y, z + e) - sdf(x, y, z - e);
-    const len = Math.hypot(nx, ny, nz) || 1;
-    verts.push(x + (nx / len) * EYE_LIFT, y + (ny / len) * EYE_LIFT, z + (nz / len) * EYE_LIFT);
-    return verts.length / 3 - 1;
-  };
-
-  const centre = push(cx, cy);
-  const n = outline.length;
-  const ringStart: number[] = [];
-  for (let r = 1; r <= rings; r++) {
-    const k = r / rings;
-    ringStart.push(verts.length / 3);
-    for (const [ox, oy] of outline) push(cx + ox * k, cy + oy * k);
-  }
-  for (let i = 0; i < n; i++) {
-    const a = ringStart[0] + i, b = ringStart[0] + ((i + 1) % n);
-    index.push(centre, a, b);
-  }
-  for (let r = 1; r < rings; r++) {
-    const inner = ringStart[r - 1], outer = ringStart[r];
-    for (let i = 0; i < n; i++) {
-      const i1 = (i + 1) % n;
-      index.push(inner + i, outer + i, outer + i1);
-      index.push(inner + i, outer + i1, inner + i1);
-    }
-  }
-
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-  g.setIndex(index);
+  const shape = new THREE.Shape();
+  outline.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
+  shape.closePath();
+  const g = new THREE.ExtrudeGeometry(shape, { depth: EYE_ABOVE + EYE_BELOW, bevelEnabled: false, curveSegments: 1 });
+  g.deleteAttribute("uv");
+  // Local frame: pill height along the body's up as seen on the surface,
+  // extrusion along the outward normal.
+  const up = new THREE.Vector3(0, 1, 0);
+  const u = new THREE.Vector3().crossVectors(up, n);
+  if (u.lengthSq() < 1e-6) u.set(1, 0, 0);
+  u.normalize();
+  const v = new THREE.Vector3().crossVectors(n, u).normalize();
+  const m = new THREE.Matrix4().makeBasis(u, v, n);
+  m.setPosition(p.clone().addScaledVector(n, -EYE_BELOW));
+  g.applyMatrix4(m);
   g.computeVertexNormals();
   return g;
 }
