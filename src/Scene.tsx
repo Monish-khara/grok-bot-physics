@@ -219,9 +219,21 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
     [settings.impulse, massFactor],
   );
 
+  // The slab widens live when bots grow, but only narrows on Respawn: pulling
+  // the front/back walls in past bots that are already sitting deep would
+  // leave them outside the floor. So track the largest scale since the drop.
+  const [slabScale, setSlabScale] = useState(settings.botScale);
+  useEffect(() => {
+    setSlabScale((s) => Math.max(s, settings.botScale));
+  }, [settings.botScale]);
+  useEffect(() => {
+    setSlabScale(settings.botScale);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation]);
+
   const wallH = 60;
   const wallT = 0.5;
-  const slabDepth = SLAB_DEPTH * settings.botScale;
+  const slabDepth = SLAB_DEPTH * Math.max(slabScale, settings.botScale);
 
   return (
     <Physics gravity={[0, -settings.gravity, 0]} timeStep={1 / 60}>
