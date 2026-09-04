@@ -99,17 +99,9 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
 
   // Flat ink fill, like the Base shapes v2 tool: unlit, exact token color.
   const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
-  const eyeMaterial = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        color: EYE_COLOR,
-        toneMapped: false,
-        polygonOffset: true,
-        polygonOffsetFactor: -4,
-        polygonOffsetUnits: -4,
-      }),
-    [],
-  );
+  // Eyes are solid inlays that intersect the body, so the plain depth test
+  // sorts them; no offset tricks needed.
+  const eyeMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: EYE_COLOR, toneMapped: false }), []);
 
   const body = () => bodyRef.current;
 
@@ -222,7 +214,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         onPointerCancel={onPointerUp}
       >
         {bot.eyes.map((g, i) => (
-          <mesh key={i} geometry={g} material={eyeMaterial} renderOrder={1} />
+          <mesh key={i} geometry={g} material={eyeMaterial} />
         ))}
       </mesh>
     </RigidBody>
