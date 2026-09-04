@@ -85,19 +85,24 @@ Copied read-only from the Sand-Toolkit repo:
 ## How it works
 
 - `src/geometry.ts` builds each body as smooth analytic geometry wherever the
-  definition allows it, so silhouettes stay clean at any zoom: the teardrop and
-  wedge are `LatheGeometry` surfaces of revolution from their (lightly
-  smoothed, spline-resampled) profile curves; the blob, square and tablet are a
+  definition allows it, so   silhouettes stay clean at any zoom: the teardrop and
+  wedge are `LatheGeometry` surfaces of revolution (192 segments) from their
+  profile curves, refitted with a local quadratic smoother, made monotone
+  toward the tips and closed with a tangent spherical fillet at each pointed
+  end (the tool's own revolve closes those to a rounded axis point); the blob,
+  square and tablet are a
   sphere, a `RoundedBoxGeometry` and a capsule; the cloud and heart are the
   tool's rounded loft stitched directly from scaled cross-sections. Only the
   three bevelled slabs (sparkle, clover, star) still go through three's
   `MarchingCubes`, at 128³ with every vertex then snapped onto the exact SDF
-  surface. Each body also has a signed distance field, used to drape the two
-  white pill eyes (each eye vertex is pushed along the view axis until it meets
-  the surface, then lifted a hair along the normal). All ten build once in
-  about a second and are reused across respawns and rescales. Bodies use an
-  unlit `MeshBasicMaterial` with the exact token hex; eyes are paper-white,
-  like the tool's carved eyes.
+  surface. Each body also has a signed distance field, used to place the two
+  eyes: each is a solid white pill (an extruded stadium) set into the body
+  along the surface normal at its centre, sunk 0.04 body units below the
+  surface with a 0.025 lip standing proud, so the ordinary depth test hides
+  the buried part and the whole eye once the face turns away — no lift or
+  polygon offset. All ten build once in about a second and are reused across
+  respawns and rescales. Bodies use an unlit `MeshBasicMaterial` with the
+  exact token hex; eyes are paper-white, like the tool's carved eyes.
 - `src/Bot.tsx` wraps each body in a Rapier `RigidBody` with a convex-hull
   collider built from a thinned copy of the mesh vertices, scaled with the
   `bot scale` setting (ball/box fallback if the hull fails), and handles tap,
