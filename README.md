@@ -85,7 +85,7 @@ Copied read-only from the Sand-Toolkit repo:
 ## How it works
 
 - `src/geometry.ts` builds each body as smooth analytic geometry wherever the
-  definition allows it, so   silhouettes stay clean at any zoom: the teardrop and
+  definition allows it, so silhouettes stay clean at any zoom: the teardrop and
   wedge are `LatheGeometry` surfaces of revolution (192 segments) from their
   profile curves, refitted with a local quadratic smoother, made monotone
   toward the tips and closed with a tangent spherical fillet at each pointed
