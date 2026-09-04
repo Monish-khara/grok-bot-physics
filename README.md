@@ -37,11 +37,17 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   - `drag spin` — degrees of rotation per pixel of drag.
   - `face seeking` — a soft weeble torque that swings tumbling bots back to face
     the camera upright, so eyes stay readable once they settle. 0 disables it.
+  - `bot scale` — 0.5×–2× size multiplier for every bot, applied live to the
+    meshes and their colliders (the play space deepens to fit, and tap
+    impulses scale with mass so kicks feel the same). Respawn re-drops at the
+    current scale with spacing adjusted so big bots land inside the walls.
   - `face camera` — off by default (full 3D tumbling). On: bots keep their
     face toward the viewer (no depth travel, spin only about the view axis).
   - `Respawn` — re-drops all ten bots with reshuffled colors.
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
+Add `?lineup` to the URL to drop the bots in one evenly spaced, upright row
+(handy for screenshots).
 
 ## Troubleshooting
 
@@ -78,14 +84,24 @@ Copied read-only from the Sand-Toolkit repo:
 
 ## How it works
 
-- `src/geometry.ts` turns each body definition into a signed distance field,
-  extracts the surface with three's `MarchingCubes`, and drapes two white pill
-  eyes onto it (each eye vertex is pushed along the view axis until it meets the
-  surface, then lifted a hair). Bodies use an unlit `MeshBasicMaterial` with the
-  exact token hex; eyes are paper-white, like the tool's carved eyes.
+- `src/geometry.ts` builds each body as smooth analytic geometry wherever the
+  definition allows it, so silhouettes stay clean at any zoom: the teardrop and
+  wedge are `LatheGeometry` surfaces of revolution from their (lightly
+  smoothed, spline-resampled) profile curves; the blob, square and tablet are a
+  sphere, a `RoundedBoxGeometry` and a capsule; the cloud and heart are the
+  tool's rounded loft stitched directly from scaled cross-sections. Only the
+  three bevelled slabs (sparkle, clover, star) still go through three's
+  `MarchingCubes`, at 128³ with every vertex then snapped onto the exact SDF
+  surface. Each body also has a signed distance field, used to drape the two
+  white pill eyes (each eye vertex is pushed along the view axis until it meets
+  the surface, then lifted a hair along the normal). All ten build once in
+  about a second and are reused across respawns and rescales. Bodies use an
+  unlit `MeshBasicMaterial` with the exact token hex; eyes are paper-white,
+  like the tool's carved eyes.
 - `src/Bot.tsx` wraps each body in a Rapier `RigidBody` with a convex-hull
-  collider built from a thinned copy of the mesh vertices (ball/box fallback if
-  the hull fails), and handles tap, drag-to-rotate and flick.
+  collider built from a thinned copy of the mesh vertices, scaled with the
+  `bot scale` setting (ball/box fallback if the hull fails), and handles tap,
+  drag-to-rotate and flick.
 - `src/Scene.tsx` sets up an orthographic camera looking down -Z, an invisible
   floor and walls at the viewport edges, a shallow front/back slab, the
   face-seeking torque, click handling and the Leva panel.
