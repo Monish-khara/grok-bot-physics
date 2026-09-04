@@ -1,21 +1,34 @@
 import * as THREE from "three";
 import { MarchingCubes } from "three/examples/jsm/objects/MarchingCubes.js";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { SHAPES, type BotShape } from "./data/shapes";
 import { BODIES, type BodyDef, type EyeFormation, type Pt2 } from "./data/bodies";
 
 /** World units per body unit for a bot of eye-formation size 1. */
 export const WORLD_PER_BODY = 0.68;
-/** Marching-cubes grid resolution per axis. */
-const RESOLUTION = 64;
+/**
+ * Marching-cubes grid resolution per axis. Only the rounded slabs (sparkle,
+ * clover, star) go through marching cubes; everything else is analytic. At
+ * 128 a grid cell is ~0.02 body units (under 2 px at 1440x900), and the
+ * extracted vertices are then snapped onto the exact SDF surface.
+ */
+const RESOLUTION = 128;
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
 const GRID_SCALE = 0.78;
+/** Segments around the axis for surfaces of revolution and the capsule. */
+const RADIAL_SEGMENTS = 128;
+/** Cross-section levels through a loft, pole to pole. */
+const LOFT_LEVELS = 72;
 /**
- * How far eyes float above the surface, in body units. Must clear the
- * marching-cubes discretisation error (about half a grid cell, ~0.02 body
- * units at RESOLUTION 64) or the faceted body pokes through the pill.
+ * How far eyes float above the surface, in body units. Enough to clear the
+ * small mismatch between the analytic mesh and the SDF used to drape them
+ * (a few thousandths of a body unit) with margin for the depth test.
  */
 const EYE_LIFT = 0.05;
+/** Resolution and half-extent (body units) of the cached 2D outline SDFs. */
+const SDF_GRID = 256;
+const SDF_EXTENT = 1.3;
 
 type Sdf = (x: number, y: number, z: number) => number;
 
@@ -91,7 +104,7 @@ function bodySdf(def: BodyDef): Sdf {
     case "slab": {
       // Rounded slab: the outline inset by `bevel`, then inflated by a sphere of
       // radius `bevel`, so the mid-plane silhouette is the drawn outline exactly.
-      const d2 = gridded2d(polygonSdf(def.loop), 128, 1.3);
+      const d2 = gridded2d(polygonSdf(def.loop), SDF_GRID, SDF_EXTENT);
       const flat = def.halfDepth - def.bevel;
       return (x, y, z) => {
         const qx = d2(x, y) + def.bevel;
@@ -103,7 +116,7 @@ function bodySdf(def: BodyDef): Sdf {
     case "loft": {
       // Cross-sections are the outline scaled by cos(phi)^exponent at
       // z = depth * sin(phi) — the tool's roundedLoft.
-      const d2 = gridded2d(polygonSdf(def.ring), 128, 1.3);
+      const d2 = gridded2d(polygonSdf(def.ring), SDF_GRID, SDF_EXTENT);
       const k = def.exponent / 2;
       return (x, y, z) => {
         const t = Math.abs(z) / def.depth;
@@ -117,7 +130,7 @@ function bodySdf(def: BodyDef): Sdf {
       // Profile is (radius, y) from bottom to top; close it down the axis.
       const prof = def.profile;
       const loop: Pt2[] = [...prof.map(([r, y]) => [r, y] as Pt2), ...[...prof].reverse().map(([r, y]) => [-r, y] as Pt2)];
-      const d2 = gridded2d(polygonSdf(loop), 128, 1.3);
+      const d2 = gridded2d(polygonSdf(loop), SDF_GRID, SDF_EXTENT);
       return (x, y, z) => d2(Math.hypot(x, z), y);
     }
 
@@ -129,13 +142,141 @@ function bodySdf(def: BodyDef): Sdf {
   }
 }
 
-// ── Surface extraction ───────────────────────────────────────────────────────
+// ── Body surfaces, in body units ─────────────────────────────────────────────
+
+/**
+ * The dumped profiles were resampled to even y steps, which left the radii
+ * dithering by ~0.01 body units from point to point (about a pixel at 2x).
+ * Two passes of a [1 2 1]/4 filter on the radius kill that alternation
+ * exactly, then a centripetal Catmull-Rom resample gives an even, dense
+ * curve. Endpoints (the flat caps) are kept as they are.
+ */
+function smoothProfile(profile: readonly Pt2[]): Pt2[] {
+  let r = profile.map(([radius]) => radius);
+  for (let pass = 0; pass < 2; pass++) {
+    r = r.map((v, i) => (i === 0 || i === r.length - 1 ? v : (r[i - 1] + 2 * v + r[i + 1]) / 4));
+  }
+  const curve = new THREE.CatmullRomCurve3(
+    r.map((radius, i) => new THREE.Vector3(radius, profile[i][1], 0)),
+    false,
+    "centripetal",
+  );
+  return curve.getPoints(profile.length * 3).map((p) => [Math.max(0, p.x), p.y] as Pt2);
+}
+
+/**
+ * Surface of revolution straight from the tool's profile curve (radius, y),
+ * bottom to top, closed onto the axis at both ends. Exact silhouette at any
+ * zoom — no voxel steps.
+ */
+function latheBody(profile: readonly Pt2[]): THREE.BufferGeometry {
+  const pts = [
+    new THREE.Vector2(0, profile[0][1]),
+    ...profile.map(([r, y]) => new THREE.Vector2(r, y)),
+    new THREE.Vector2(0, profile[profile.length - 1][1]),
+  ];
+  return new THREE.LatheGeometry(pts, RADIAL_SEGMENTS);
+}
+
+/**
+ * The tool's roundedLoft, built directly: cross-sections are the outline
+ * scaled by cos(phi)^exponent at z = depth * sin(phi), stitched pole to pole.
+ * The front silhouette is the drawn outline itself.
+ */
+function loftBody(ring: readonly Pt2[], depth: number, exponent: number): THREE.BufferGeometry {
+  const n = ring.length;
+  const levels = LOFT_LEVELS;
+  const verts: number[] = [];
+  const index: number[] = [];
+  // Interior levels only; the poles are single vertices.
+  for (let j = 1; j < levels; j++) {
+    const phi = -Math.PI / 2 + (Math.PI * j) / levels;
+    const s = Math.pow(Math.cos(phi), exponent);
+    const z = depth * Math.sin(phi);
+    for (const [x, y] of ring) verts.push(x * s, y * s, z);
+  }
+  const back = verts.length / 3;
+  verts.push(0, 0, -depth);
+  const front = verts.length / 3;
+  verts.push(0, 0, depth);
+  const at = (level: number, i: number) => (level - 1) * n + (i % n);
+  for (let i = 0; i < n; i++) index.push(back, at(1, i + 1), at(1, i));
+  for (let j = 1; j < levels - 1; j++) {
+    for (let i = 0; i < n; i++) {
+      const a = at(j, i), b = at(j, i + 1), c = at(j + 1, i), d = at(j + 1, i + 1);
+      index.push(a, b, d, a, d, c);
+    }
+  }
+  for (let i = 0; i < n; i++) index.push(front, at(levels - 1, i), at(levels - 1, i + 1));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(index);
+  return g;
+}
+
+function bodyGeometry(def: BodyDef, sdf: Sdf): THREE.BufferGeometry {
+  switch (def.kind) {
+    case "sphere":
+      return new THREE.SphereGeometry(1, RADIAL_SEGMENTS, RADIAL_SEGMENTS / 2);
+    case "box":
+      return new RoundedBoxGeometry(2 * def.hx, 2 * def.hy, 2 * def.hz, 8, def.round);
+    case "capsuleX": {
+      const g = new THREE.CapsuleGeometry(def.radius, 2 * def.halfSpan, 32, RADIAL_SEGMENTS);
+      g.rotateZ(Math.PI / 2);
+      return g;
+    }
+    case "revolve":
+      return latheBody(def.profile);
+    case "loft":
+      return loftBody(def.ring, def.depth, def.exponent);
+    case "slab":
+      // Bevelled extrusions of concave outlines have no cheap closed form
+      // (the rim is an offset of the outline, with tips that round over and
+      // merge), so these still go through marching cubes — at high
+      // resolution, then snapped onto the exact SDF surface.
+      return extractSurface(sdf);
+  }
+}
+
+// ── Marching cubes (rounded slabs) ───────────────────────────────────────────
 
 let cubes: MarchingCubes | null = null;
 
+/**
+ * Pull every vertex onto the zero level set of the SDF (a few Newton steps
+ * along the gradient). Marching cubes places vertices by linear
+ * interpolation of grid samples, which leaves them a fraction of a cell off
+ * the true surface; that residue is what reads as stair-stepping on a flat
+ * silhouette.
+ */
+function snapToSurface(g: THREE.BufferGeometry, sdf: Sdf) {
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  const arr = pos.array as Float32Array;
+  const e = 0.004;
+  for (let i = 0; i < arr.length; i += 3) {
+    let x = arr[i], y = arr[i + 1], z = arr[i + 2];
+    for (let k = 0; k < 3; k++) {
+      const d = sdf(x, y, z);
+      if (Math.abs(d) < 1e-5) break;
+      const gx = sdf(x + e, y, z) - sdf(x - e, y, z);
+      const gy = sdf(x, y + e, z) - sdf(x, y - e, z);
+      const gz = sdf(x, y, z + e) - sdf(x, y, z - e);
+      const len2 = (gx * gx + gy * gy + gz * gz) / (4 * e * e) || 1;
+      const k2 = d / len2 / (2 * e);
+      x -= gx * k2;
+      y -= gy * k2;
+      z -= gz * k2;
+    }
+    arr[i] = x;
+    arr[i + 1] = y;
+    arr[i + 2] = z;
+  }
+  pos.needsUpdate = true;
+}
+
 function extractSurface(sdf: Sdf): THREE.BufferGeometry {
   if (!cubes) {
-    cubes = new MarchingCubes(RESOLUTION, new THREE.MeshBasicMaterial(), false, false, 120000);
+    cubes = new MarchingCubes(RESOLUTION, new THREE.MeshBasicMaterial(), false, false, 400000);
     cubes.isolation = 0;
   }
   const size = RESOLUTION, half = size / 2;
@@ -162,16 +303,15 @@ function extractSurface(sdf: Sdf): THREE.BufferGeometry {
   raw.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   const merged = mergeVertices(raw, 1e-4);
   raw.dispose();
-  ensureOutwardWinding(merged);
-  merged.computeVertexNormals();
+  snapToSurface(merged, sdf);
   return merged;
 }
 
 /**
- * MarchingCubes winds its triangles for a "field grows inward" convention,
- * which for our SDF sign comes out inside-out. A flat unlit fill hides that,
- * but raycasting (clicks, drags) culls back faces — so make the winding
- * outward by checking the signed volume.
+ * Make the winding outward by checking the signed volume. MarchingCubes winds
+ * for a "field grows inward" convention (inside-out for our SDF sign), and the
+ * lathe/loft builders depend on the direction the source curves run. A flat
+ * unlit fill hides that, but raycasting (clicks, drags) culls back faces.
  */
 function ensureOutwardWinding(g: THREE.BufferGeometry) {
   const idx = g.getIndex();
@@ -197,7 +337,7 @@ function ensureOutwardWinding(g: THREE.BufferGeometry) {
 // ── Eyes ────────────────────────────────────────────────────────────────────
 
 /** A stadium (or circle) outline, y up, centred on the origin. */
-function stadium(width: number, height: number, segments = 14): Pt2[] {
+function stadium(width: number, height: number, segments = 24): Pt2[] {
   const r = width / 2;
   const straight = Math.max(0, height / 2 - r);
   const pts: Pt2[] = [];
@@ -293,11 +433,16 @@ function eyeGeometries(sdf: Sdf, f: EyeFormation): THREE.BufferGeometry[] {
 // ── Assembly ─────────────────────────────────────────────────────────────────
 
 export function buildBotGeometry(shape: BotShape): BotGeometry {
-  const { body, eyes } = BODIES[shape.id];
+  const { body: rawBody, eyes } = BODIES[shape.id];
+  // The mesh and the eye-draping SDF must describe the same surface.
+  const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
   const sdf = bodySdf(body);
   const scale = WORLD_PER_BODY * eyes.size;
 
-  const geometry = extractSurface(sdf);
+  const geometry = bodyGeometry(body, sdf);
+  // Raycasting (taps, drags) culls back faces, so every body must wind outward.
+  ensureOutwardWinding(geometry);
+  geometry.computeVertexNormals();
   geometry.scale(scale, scale, scale);
   geometry.computeBoundingBox();
   const half = new THREE.Vector3();
@@ -318,7 +463,13 @@ export function buildBotGeometry(shape: BotShape): BotGeometry {
 
 let cache: BotGeometry[] | null = null;
 
+/** Builds all ten bodies once; later calls (respawns, rescales) reuse them. */
 export function getBotGeometries(): BotGeometry[] {
-  if (!cache) cache = SHAPES.map(buildBotGeometry);
+  if (!cache) {
+    const t0 = performance.now();
+    cache = SHAPES.map(buildBotGeometry);
+    // Test hook: headless checks read the build time from here.
+    (window as unknown as { __grokBotsBuildMs?: number }).__grokBotsBuildMs = performance.now() - t0;
+  }
   return cache;
 }
