@@ -22,6 +22,8 @@ type Props = {
   faceCamera: boolean;
   /** Degrees of spin per pixel of drag, applied as angular velocity. */
   dragSpin: number;
+  /** Uniform size multiplier applied to the mesh and its collider. */
+  scale: number;
   onTap: (body: RapierRigidBody) => void;
 };
 
@@ -69,7 +71,7 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, friction, faceCamera, dragSpin, onTap },
+  { bot, color, position, rotation, restitution, friction, faceCamera, dragSpin, scale, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
@@ -86,13 +88,14 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
   );
 
   const hull = useMemo(() => {
-    const pts = sampleHullPoints(bot.hullPoints);
+    const pts = sampleHullPoints(bot.hullPoints).map((v) => v * scale);
     // Rapier returns null when it cannot build a hull (degenerate cloud).
     // Probe once so odd bodies fall back to a box or ball instead of
-    // silently having no collider at all.
+    // silently having no collider at all. A fresh array per scale also makes
+    // the collider re-create, since its args are immutable.
     const desc = rapier.ColliderDesc.convexHull(pts);
     return desc ? pts : null;
-  }, [bot, rapier]);
+  }, [bot, rapier, scale]);
 
   // Flat ink fill, like the Base shapes v2 tool: unlit, exact token color.
   const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
@@ -184,8 +187,8 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
     }
   };
 
-  const he = bot.halfExtents;
-  const roundish = Math.abs(he.x - he.y) < 0.15 && Math.abs(he.x - he.z) < 0.35;
+  const he = bot.halfExtents.clone().multiplyScalar(scale);
+  const roundish = Math.abs(he.x - he.y) < 0.15 * scale && Math.abs(he.x - he.z) < 0.35 * scale;
 
   return (
     <RigidBody
@@ -212,6 +215,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       <mesh
         geometry={bot.geometry}
         material={material}
+        scale={scale}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

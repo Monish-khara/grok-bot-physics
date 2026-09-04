@@ -8,9 +8,12 @@ import { getBotGeometries } from "./geometry";
 import { BOT_HUES, TOKENS } from "./data/tokens";
 import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./Status";
 
-/** Front-to-back thickness of the play space; keeps the pile readable. */
+/**
+ * Front-to-back thickness of the play space at bot scale 1; keeps the pile
+ * readable. Scales with the bots so a 2x troop still fits between the slabs.
+ */
 const SLAB_DEPTH = 3.2;
-/** Typical bot diameter in world units, for spawn spacing. */
+/** Typical bot diameter in world units at bot scale 1, for spawn spacing. */
 const BOT_SIZE = 1.6;
 const FLOOR_Y = 0;
 /** World units visible top-to-bottom; width follows the aspect ratio. */
@@ -26,16 +29,30 @@ type Spawn = {
   rotation: [number, number, number];
 };
 
-function randomSpawns(count: number, halfWidth: number, topY: number, faceCamera: boolean): Spawn[] {
+/** `?lineup` drops the troop in one evenly spaced, upright row — for screenshots. */
+const LINEUP = typeof location !== "undefined" && new URLSearchParams(location.search).has("lineup");
+
+function randomSpawns(count: number, halfWidth: number, topY: number, faceCamera: boolean, scale: number): Spawn[] {
+  const size = BOT_SIZE * scale;
+  if (LINEUP) {
+    const span = 2 * halfWidth - size * 1.2;
+    return Array.from({ length: count }, (_, i) => ({
+      position: [-halfWidth + size * 0.6 + (span * (i + 0.5)) / count, topY + 0.5 * scale, 0],
+      rotation: [0, 0, 0],
+    }));
+  }
   // Drop within a narrow column so the bots actually pile up rather than
   // landing in a row across the whole viewport.
-  const spread = Math.min(3, Math.max(0.3, halfWidth - BOT_SIZE));
+  const spread = Math.min(3 * scale, Math.max(0.3, halfWidth - size));
+  // Keep every spawn clear of the side walls, whatever the scale and aspect.
+  const maxX = Math.max(0, halfWidth - size * 0.65);
+  const depthRoom = Math.max(0, (SLAB_DEPTH * scale) / 2 - size * 0.5);
   // Two staggered columns so the whole troop is in view within a second.
   return Array.from({ length: count }, (_, i) => ({
     position: [
-      (i % 2 === 0 ? -1 : 1) * (0.9 + Math.random() * spread),
-      topY + 0.5 + Math.floor(i / 2) * 1.8 + Math.random() * 0.4,
-      faceCamera ? 0 : (Math.random() * 2 - 1) * (SLAB_DEPTH / 2 - BOT_SIZE * 0.5),
+      (i % 2 === 0 ? -1 : 1) * Math.min(maxX, 0.9 * scale + Math.random() * spread),
+      topY + (0.5 + Math.floor(i / 2) * 1.8 + Math.random() * 0.4) * scale,
+      faceCamera ? 0 : (Math.random() * 2 - 1) * depthRoom,
     ],
     rotation: [
       faceCamera ? 0 : (Math.random() - 0.5) * 0.9,
@@ -79,6 +96,7 @@ type Settings = {
   faceCamera: boolean;
   dragSpin: number;
   righting: number;
+  botScale: number;
 };
 
 const tmpQ = new THREE.Quaternion();
@@ -128,13 +146,26 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
   useRighting(bodies, settings.righting, settings.gravity, !settings.faceCamera);
   useEffect(() => {
-    // Test hook: lets headless checks know the bots are in the world.
-    (window as unknown as { __grokBotsReady?: boolean }).__grokBotsReady = true;
-  }, []);
+    // Test hooks: let headless checks know the bots are in the world and
+    // where each one is (world units, y up; the camera looks down -Z).
+    const w = window as unknown as {
+      __grokBotsReady?: boolean;
+      __grokBotPositions?: () => { id: string; x: number; y: number; z: number }[];
+    };
+    w.__grokBotsReady = true;
+    w.__grokBotPositions = () =>
+      bodies.current.flatMap((b, i) => {
+        if (!b) return [];
+        const p = b.translation();
+        return [{ id: bots[i].shape.id, x: p.x, y: p.y, z: p.z }];
+      });
+  }, [bots]);
 
   const spawns = useMemo(
-    () => randomSpawns(bots.length, halfWidth, topY, settings.faceCamera),
-    // Re-roll on respawn only; resizing the window shouldn't re-drop the pile.
+    () => randomSpawns(bots.length, halfWidth, topY, settings.faceCamera, settings.botScale),
+    // Re-roll on respawn only; resizing the window or moving a slider
+    // shouldn't re-drop the pile. Scale is read at drop time for spacing;
+    // live scale changes just resize the bodies where they are.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [bots.length, generation],
   );
@@ -149,22 +180,26 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bots, generation]);
 
+  // Mass grows with the cube of the scale; scale impulses the same way so a
+  // tap launches a 2x bot as high as a 1x one.
+  const massFactor = settings.botScale ** 3;
+
   const tap = useCallback(
     (body: RapierRigidBody) => {
-      const s = settings.impulse;
+      const s = settings.impulse * massFactor;
       body.applyImpulse({ x: (Math.random() - 0.5) * s * 0.3, y: s, z: 0 }, true);
       body.applyTorqueImpulse(
         { x: (Math.random() - 0.5) * s * 0.4, y: (Math.random() - 0.5) * s * 0.4, z: (Math.random() - 0.5) * s * 0.6 },
         true,
       );
     },
-    [settings.impulse],
+    [settings.impulse, massFactor],
   );
 
   const burst = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
       const origin = e.point;
-      const strength = settings.impulse * 1.6;
+      const strength = settings.impulse * 1.6 * massFactor;
       for (const body of bodies.current) {
         if (!body) continue;
         const p = body.translation();
@@ -181,21 +216,22 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
         );
       }
     },
-    [settings.impulse],
+    [settings.impulse, massFactor],
   );
 
   const wallH = 60;
   const wallT = 0.5;
+  const slabDepth = SLAB_DEPTH * settings.botScale;
 
   return (
     <Physics gravity={[0, -settings.gravity, 0]} timeStep={1 / 60}>
       {/* Floor and walls. Walls sit exactly at the viewport edges for this aspect ratio. */}
       <RigidBody type="fixed" friction={settings.friction} restitution={settings.restitution}>
-        <CuboidCollider args={[halfWidth + 6, wallT, SLAB_DEPTH]} position={[0, FLOOR_Y - wallT, 0]} />
-        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[-halfWidth - wallT, wallH - 2, 0]} />
-        <CuboidCollider args={[wallT, wallH, SLAB_DEPTH]} position={[halfWidth + wallT, wallH - 2, 0]} />
-        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, -SLAB_DEPTH / 2 - wallT]} />
-        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, SLAB_DEPTH / 2 + wallT]} />
+        <CuboidCollider args={[halfWidth + 6, wallT, slabDepth]} position={[0, FLOOR_Y - wallT, 0]} />
+        <CuboidCollider args={[wallT, wallH, slabDepth]} position={[-halfWidth - wallT, wallH - 2, 0]} />
+        <CuboidCollider args={[wallT, wallH, slabDepth]} position={[halfWidth + wallT, wallH - 2, 0]} />
+        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, -slabDepth / 2 - wallT]} />
+        <CuboidCollider args={[halfWidth + 6, wallH, wallT]} position={[0, wallH - 2, slabDepth / 2 + wallT]} />
       </RigidBody>
 
       {bots.map((bot, i) => (
@@ -212,6 +248,7 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
           friction={settings.friction}
           faceCamera={settings.faceCamera}
           dragSpin={settings.dragSpin}
+          scale={settings.botScale}
           onTap={tap}
         />
       ))}
@@ -248,6 +285,7 @@ export function Scene() {
     impulse: { value: 9, min: 1, max: 30, step: 0.5, label: "impulse strength" },
     dragSpin: { value: 0.35, min: 0.05, max: 1.5, step: 0.05, label: "drag spin" },
     righting: { value: 1, min: 0, max: 3, step: 0.05, label: "face seeking" },
+    botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
     faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
   });
