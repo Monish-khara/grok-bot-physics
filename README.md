@@ -13,6 +13,39 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `canvas2d` — runs without WebGL
+
+Cursor's built-in browser tab blocks WebGL (`getContext("webgl")` returns
+null) but runs WebAssembly. This branch adds a **Canvas 2D renderer** that
+kicks in automatically when WebGL is unavailable, so the same demo — Rapier
+physics, all Leva controls, taps, drags, flicks — renders there too. A small
+label in the bottom-left corner says which renderer is active.
+
+![The Canvas 2D fallback, captured with WebGL disabled](docs/screenshot-canvas2d.png)
+
+- **How:** `src/canvas2d.ts` is a drop-in for three's `WebGLRenderer` that
+  React Three Fiber accepts through the `gl` prop, so the scene graph,
+  physics and pointer raycasting are untouched. Each frame it projects every
+  mesh through the camera, painter-sorts the bodies by view depth, and fills
+  each body's **silhouette** — the loop of edges where front-facing triangles
+  meet back-facing ones, oriented so the nonzero winding rule yields exactly
+  the union of the front faces. Only a few hundred path segments per body are
+  emitted, so a frame costs ~4 ms of JS for ten bots. Eyes are drawn after
+  their body while their surface normal faces the camera, clipped to the body
+  silhouette.
+- **Mesh set:** the fallback uses a slightly lighter geometry set (`"low"`
+  quality in `src/geometry.ts`: 96 radial segments, 96³ marching cubes) since
+  every vertex is projected on the CPU; the WebGL path keeps the full set.
+- **Force a renderer:** `?renderer=canvas2d` or `?renderer=webgl`.
+- **Run alongside `master`:** `npx vite --port 4732 --strictPort --host 127.0.0.1`
+  (this branch was served at <http://127.0.0.1:4732/> while `master` stayed on
+  4731).
+- **Known differences from WebGL:** depth is resolved per body, not per pixel,
+  so two bots that interpenetrate (rare — colliders keep them apart) overlap
+  in centre-depth order; an eye at a grazing angle shows its full pill
+  footprint clipped to the body rather than the depth-tested sliver; no
+  antialiasing differences worth noting.
+
 ## Run
 
 ```bash
@@ -59,10 +92,9 @@ If the title and panel render but the scene is blank, an on-screen card says
 which stage failed and prints diagnostics (WebGL renderer string, WebAssembly
 availability, viewport, user agent):
 
-- **WebGL is not available / WebGL context creation failed** — the browser has
-  WebGL or GPU access disabled. Cursor's built-in browser tab is known to do
-  this (`Sandboxed = yes … BindToCurrentSequence failed`). Open the URL in
-  Chrome, Safari or Firefox instead.
+- **WebGL is not available** — on this branch the demo falls back to the
+  Canvas 2D renderer automatically (see above), so Cursor's built-in browser
+  tab works. `master` shows an error card instead.
 - **Physics engine (Rapier WASM) failed to load** — WebAssembly compilation is
   blocked (CSP or policy).
 - **Runtime error / The scene crashed** — a JavaScript error; the message is shown.
@@ -111,6 +143,9 @@ Copied read-only from the Sand-Toolkit repo:
   collider built from a thinned copy of the mesh vertices, scaled with the
   `bot scale` setting (ball/box fallback if the hull fails), and handles tap,
   drag-to-rotate and flick.
+- `src/canvas2d.ts` (this branch) is the Canvas 2D fallback renderer described
+  above; `Scene.tsx` picks it when `detectWebGL()` fails or `?renderer=canvas2d`
+  is set, and hands the bots the lighter geometry set.
 - `src/Scene.tsx` sets up an orthographic camera looking down -Z, an invisible
   floor and walls at the viewport edges, a shallow front/back slab, the
   face-seeking torque, click handling and the Leva panel.

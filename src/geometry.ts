@@ -9,7 +9,8 @@ import { BODIES, type BodyDef, type EyeFormation, type Pt2 } from "./data/bodies
 export const WORLD_PER_BODY = 0.68;
 /**
  * Mesh density. "high" is what the WebGL renderer draws; "low" is a lighter
- * set for the Canvas 2D fallback, which pays per triangle edge it fills.
+ * set for the Canvas 2D fallback, which projects every vertex on the CPU each
+ * frame (it only fills silhouettes, so triangle count is not the limit).
  */
 export type Quality = "high" | "low";
 
@@ -35,7 +36,7 @@ type QualitySpec = {
 
 const QUALITY: Record<Quality, QualitySpec> = {
   high: { mcRes: 128, radial: 192, profileSamples: 260, loftLevels: 72, ringStride: 1, boxSegments: 8, capsuleCaps: 32, eyeSegments: 24 },
-  low: { mcRes: 56, radial: 40, profileSamples: 44, loftLevels: 20, ringStride: 3, boxSegments: 3, capsuleCaps: 8, eyeSegments: 10 },
+  low: { mcRes: 96, radial: 96, profileSamples: 130, loftLevels: 48, ringStride: 1, boxSegments: 6, capsuleCaps: 16, eyeSegments: 16 },
 };
 
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
@@ -514,8 +515,12 @@ function eyeGeometry(
   const shape = new THREE.Shape();
   outline.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
   shape.closePath();
-  const g = new THREE.ExtrudeGeometry(shape, { depth: EYE_ABOVE + EYE_BELOW, bevelEnabled: false, curveSegments: 1 });
-  g.deleteAttribute("uv");
+  const extruded = new THREE.ExtrudeGeometry(shape, { depth: EYE_ABOVE + EYE_BELOW, bevelEnabled: false, curveSegments: 1 });
+  extruded.deleteAttribute("uv");
+  extruded.deleteAttribute("normal");
+  // Indexed with shared vertices so the Canvas 2D renderer can trace its silhouette.
+  const g = mergeVertices(extruded, 1e-6);
+  extruded.dispose();
   // Local frame: pill height along the body's up as seen on the surface,
   // extrusion along the outward normal.
   const up = new THREE.Vector3(0, 1, 0);
