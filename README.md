@@ -30,6 +30,10 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   flick to spin it. It is held in the air while dragged.
 - **Tap / click empty space** — radial scatter burst from that point.
 - **Leva panel (top right)**
+  - `background` — first row: RGB colour picker for the stage (click the
+    swatch for the picker, or type a hex). Default white, like the tool.
+    Applies live to both the canvas clear colour and the page behind it; the
+    HUD text flips light on dark backgrounds.
   - `gravity` — downward acceleration.
   - `bounce` — collider restitution.
   - `friction` — collider friction.

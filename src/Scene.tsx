@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import * as THREE from "three";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
-import { button, folder, useControls } from "leva";
+import { button, useControls } from "leva";
 import { Bot } from "./Bot";
 import { getBotGeometries } from "./geometry";
 import { BOT_HUES, TOKENS } from "./data/tokens";
@@ -305,6 +305,8 @@ export function Scene() {
   const globalError = useGlobalErrors();
 
   const settings = useControls({
+    // First in the panel so it is visible without expanding anything.
+    background: { value: BACKGROUND, label: "background" },
     gravity: { value: 12, min: 0, max: 40, step: 0.5 },
     restitution: { value: 0.35, min: 0, max: 1, step: 0.01, label: "bounce" },
     friction: { value: 0.6, min: 0, max: 1.5, step: 0.01 },
@@ -314,9 +316,6 @@ export function Scene() {
     botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
     faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
-    Look: folder({
-      background: { value: BACKGROUND, label: "background" },
-    }),
   });
 
   // Paint the page the same colour as the canvas so the two never mismatch
