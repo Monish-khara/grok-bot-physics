@@ -8,18 +8,38 @@ import { BODIES, type BodyDef, type EyeFormation, type Pt2 } from "./data/bodies
 /** World units per body unit for a bot of eye-formation size 1. */
 export const WORLD_PER_BODY = 0.68;
 /**
- * Marching-cubes grid resolution per axis. Only the rounded slabs (sparkle,
- * clover, star) go through marching cubes; everything else is analytic. At
- * 128 a grid cell is ~0.02 body units (under 2 px at 1440x900), and the
- * extracted vertices are then snapped onto the exact SDF surface.
+ * Mesh density. "high" is what the WebGL renderer draws; "low" is a lighter
+ * set for the Canvas 2D fallback, which pays per triangle edge it fills.
  */
-const RESOLUTION = 128;
+export type Quality = "high" | "low";
+
+type QualitySpec = {
+  /** Marching-cubes grid resolution per axis. Only the rounded slabs (sparkle,
+   * clover, star) go through marching cubes; everything else is analytic. At
+   * 128 a grid cell is ~0.02 body units (under 2 px at 1440x900), and the
+   * extracted vertices are then snapped onto the exact SDF surface. */
+  mcRes: number;
+  /** Segments around the axis for surfaces of revolution and the capsule. */
+  radial: number;
+  /** Profile samples for a surface of revolution (after refit). */
+  profileSamples: number;
+  /** Cross-section levels through a loft, pole to pole. */
+  loftLevels: number;
+  /** Keep every n-th outline point of a loft ring. */
+  ringStride: number;
+  boxSegments: number;
+  capsuleCaps: number;
+  /** Stadium segments per half for the eye pills. */
+  eyeSegments: number;
+};
+
+const QUALITY: Record<Quality, QualitySpec> = {
+  high: { mcRes: 128, radial: 192, profileSamples: 260, loftLevels: 72, ringStride: 1, boxSegments: 8, capsuleCaps: 32, eyeSegments: 24 },
+  low: { mcRes: 56, radial: 40, profileSamples: 44, loftLevels: 20, ringStride: 3, boxSegments: 3, capsuleCaps: 8, eyeSegments: 10 },
+};
+
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
 const GRID_SCALE = 0.78;
-/** Segments around the axis for surfaces of revolution and the capsule. */
-const RADIAL_SEGMENTS = 192;
-/** Cross-section levels through a loft, pole to pole. */
-const LOFT_LEVELS = 72;
 /**
  * Eyes are solid pills set into the body along the local normal: most of the
  * slab sits below the surface (so no body colour can show through and no
@@ -40,6 +60,8 @@ export type BotGeometry = {
   geometry: THREE.BufferGeometry;
   /** Two eye meshes in world units, in the body's frame. */
   eyes: THREE.BufferGeometry[];
+  /** Outward surface normal at each eye centre, in the body's frame. */
+  eyeNormals: THREE.Vector3[];
   /** World scale of this bot relative to the hero sphere. */
   scale: number;
   halfExtents: THREE.Vector3;
@@ -245,13 +267,17 @@ function dropDegenerateTriangles(g: THREE.BufferGeometry) {
  * to top, closed onto the axis at both ends. Exact silhouette at any zoom —
  * no voxel steps. Apex and seam vertices are merged so the tip is one point.
  */
-function latheBody(profile: readonly Pt2[]): THREE.BufferGeometry {
+function latheBody(profile: readonly Pt2[], q: QualitySpec): THREE.BufferGeometry {
+  const inner = profile.filter(([r]) => r > 1e-6);
+  // Thin the refitted profile evenly when a lighter mesh is wanted.
+  const stride = Math.max(1, Math.floor(inner.length / q.profileSamples));
+  const kept = inner.filter((_, i) => i % stride === 0 || i === inner.length - 1);
   const pts = [
     new THREE.Vector2(0, profile[0][1]),
-    ...profile.filter(([r]) => r > 1e-6).map(([r, y]) => new THREE.Vector2(r, y)),
+    ...kept.map(([r, y]) => new THREE.Vector2(r, y)),
     new THREE.Vector2(0, profile[profile.length - 1][1]),
   ];
-  const lathe = new THREE.LatheGeometry(pts, RADIAL_SEGMENTS);
+  const lathe = new THREE.LatheGeometry(pts, q.radial);
   lathe.deleteAttribute("uv");
   lathe.deleteAttribute("normal");
   const merged = mergeVertices(lathe, 1e-5);
@@ -265,9 +291,10 @@ function latheBody(profile: readonly Pt2[]): THREE.BufferGeometry {
  * scaled by cos(phi)^exponent at z = depth * sin(phi), stitched pole to pole.
  * The front silhouette is the drawn outline itself.
  */
-function loftBody(ring: readonly Pt2[], depth: number, exponent: number): THREE.BufferGeometry {
+function loftBody(fullRing: readonly Pt2[], depth: number, exponent: number, q: QualitySpec): THREE.BufferGeometry {
+  const ring = q.ringStride > 1 ? fullRing.filter((_, i) => i % q.ringStride === 0) : fullRing;
   const n = ring.length;
-  const levels = LOFT_LEVELS;
+  const levels = q.loftLevels;
   const verts: number[] = [];
   const index: number[] = [];
   // Interior levels only; the poles are single vertices.
@@ -296,33 +323,33 @@ function loftBody(ring: readonly Pt2[], depth: number, exponent: number): THREE.
   return g;
 }
 
-function bodyGeometry(def: BodyDef, sdf: Sdf): THREE.BufferGeometry {
+function bodyGeometry(def: BodyDef, sdf: Sdf, q: QualitySpec): THREE.BufferGeometry {
   switch (def.kind) {
     case "sphere":
-      return new THREE.SphereGeometry(1, RADIAL_SEGMENTS, RADIAL_SEGMENTS / 2);
+      return new THREE.SphereGeometry(1, q.radial, q.radial / 2);
     case "box":
-      return new RoundedBoxGeometry(2 * def.hx, 2 * def.hy, 2 * def.hz, 8, def.round);
+      return new RoundedBoxGeometry(2 * def.hx, 2 * def.hy, 2 * def.hz, q.boxSegments, def.round);
     case "capsuleX": {
-      const g = new THREE.CapsuleGeometry(def.radius, 2 * def.halfSpan, 32, RADIAL_SEGMENTS);
+      const g = new THREE.CapsuleGeometry(def.radius, 2 * def.halfSpan, q.capsuleCaps, q.radial);
       g.rotateZ(Math.PI / 2);
       return g;
     }
     case "revolve":
-      return latheBody(def.profile);
+      return latheBody(def.profile, q);
     case "loft":
-      return loftBody(def.ring, def.depth, def.exponent);
+      return loftBody(def.ring, def.depth, def.exponent, q);
     case "slab":
       // Bevelled extrusions of concave outlines have no cheap closed form
       // (the rim is an offset of the outline, with tips that round over and
       // merge), so these still go through marching cubes — at high
       // resolution, then snapped onto the exact SDF surface.
-      return extractSurface(sdf);
+      return extractSurface(sdf, q.mcRes);
   }
 }
 
 // ── Marching cubes (rounded slabs) ───────────────────────────────────────────
 
-let cubes: MarchingCubes | null = null;
+const cubesByRes = new Map<number, MarchingCubes>();
 
 /**
  * Pull every vertex onto the zero level set of the SDF (a few Newton steps
@@ -356,12 +383,15 @@ function snapToSurface(g: THREE.BufferGeometry, sdf: Sdf) {
   pos.needsUpdate = true;
 }
 
-function extractSurface(sdf: Sdf): THREE.BufferGeometry {
+function extractSurface(sdf: Sdf, resolution: number): THREE.BufferGeometry {
+  let cubes = cubesByRes.get(resolution);
   if (!cubes) {
-    cubes = new MarchingCubes(RESOLUTION, new THREE.MeshBasicMaterial(), false, false, 400000);
+    // Triangle budget scales with surface area in cells, i.e. resolution².
+    cubes = new MarchingCubes(resolution, new THREE.MeshBasicMaterial(), false, false, Math.ceil(25 * resolution * resolution));
     cubes.isolation = 0;
+    cubesByRes.set(resolution, cubes);
   }
-  const size = RESOLUTION, half = size / 2;
+  const size = resolution, half = size / 2;
   const field = cubes.field;
   for (let z = 0; z < size; z++) {
     const gz = (z - half) / half;
@@ -471,9 +501,16 @@ function frontSurface(sdf: Sdf, x: number, y: number): { p: THREE.Vector3; n: TH
  * depth test does the rest — the body hides the buried part and the whole eye
  * once the face turns away — with no lift or polygon offset.
  */
-function eyeGeometry(sdf: Sdf, cx: number, cy: number, width: number, height: number): THREE.BufferGeometry {
+function eyeGeometry(
+  sdf: Sdf,
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  q: QualitySpec,
+): { geometry: THREE.BufferGeometry; normal: THREE.Vector3 } {
   const { p, n } = frontSurface(sdf, cx, cy);
-  const outline = stadium(width, height);
+  const outline = stadium(width, height, q.eyeSegments);
   const shape = new THREE.Shape();
   outline.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
   shape.closePath();
@@ -490,23 +527,24 @@ function eyeGeometry(sdf: Sdf, cx: number, cy: number, width: number, height: nu
   m.setPosition(p.clone().addScaledVector(n, -EYE_BELOW));
   g.applyMatrix4(m);
   g.computeVertexNormals();
-  return g;
+  return { geometry: g, normal: n };
 }
 
-function eyeGeometries(sdf: Sdf, f: EyeFormation): THREE.BufferGeometry[] {
-  return [-1, 1].map((side) => eyeGeometry(sdf, f.shiftX + (side * f.gap) / 2, f.shiftY, f.width, f.height));
+function eyeGeometries(sdf: Sdf, f: EyeFormation, q: QualitySpec) {
+  return [-1, 1].map((side) => eyeGeometry(sdf, f.shiftX + (side * f.gap) / 2, f.shiftY, f.width, f.height, q));
 }
 
 // ── Assembly ─────────────────────────────────────────────────────────────────
 
-export function buildBotGeometry(shape: BotShape): BotGeometry {
+export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): BotGeometry {
+  const q = QUALITY[quality];
   const { body: rawBody, eyes } = BODIES[shape.id];
   // The mesh and the eye-draping SDF must describe the same surface.
   const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
   const sdf = bodySdf(body);
   const scale = WORLD_PER_BODY * eyes.size;
 
-  const geometry = bodyGeometry(body, sdf);
+  const geometry = bodyGeometry(body, sdf, q);
   // Raycasting (taps, drags) culls back faces, so every body must wind outward.
   ensureOutwardWinding(geometry);
   geometry.computeVertexNormals();
@@ -515,28 +553,31 @@ export function buildBotGeometry(shape: BotShape): BotGeometry {
   const half = new THREE.Vector3();
   geometry.boundingBox!.getSize(half).multiplyScalar(0.5);
 
-  const eyeGeoms = eyeGeometries(sdf, eyes);
-  for (const g of eyeGeoms) g.scale(scale, scale, scale);
+  const eyeParts = eyeGeometries(sdf, eyes, q);
+  for (const { geometry: g } of eyeParts) g.scale(scale, scale, scale);
 
   return {
     shape,
     geometry,
-    eyes: eyeGeoms,
+    eyes: eyeParts.map((e) => e.geometry),
+    eyeNormals: eyeParts.map((e) => e.normal),
     scale,
     halfExtents: half,
     hullPoints: geometry.attributes.position.array as Float32Array,
   };
 }
 
-let cache: BotGeometry[] | null = null;
+const cache = new Map<Quality, BotGeometry[]>();
 
-/** Builds all ten bodies once; later calls (respawns, rescales) reuse them. */
-export function getBotGeometries(): BotGeometry[] {
-  if (!cache) {
+/** Builds all ten bodies once per quality; later calls (respawns, rescales) reuse them. */
+export function getBotGeometries(quality: Quality = "high"): BotGeometry[] {
+  let bots = cache.get(quality);
+  if (!bots) {
     const t0 = performance.now();
-    cache = SHAPES.map(buildBotGeometry);
+    bots = SHAPES.map((shape) => buildBotGeometry(shape, quality));
+    cache.set(quality, bots);
     // Test hook: headless checks read the build time from here.
     (window as unknown as { __grokBotsBuildMs?: number }).__grokBotsBuildMs = performance.now() - t0;
   }
-  return cache;
+  return bots;
 }

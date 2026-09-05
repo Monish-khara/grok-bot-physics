@@ -4,7 +4,8 @@ import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber"
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
 import { button, useControls } from "leva";
 import { Bot } from "./Bot";
-import { getBotGeometries } from "./geometry";
+import { getBotGeometries, type Quality } from "./geometry";
+import { Canvas2DRenderer } from "./canvas2d";
 import { BOT_HUES, TOKENS } from "./data/tokens";
 import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./Status";
 
@@ -154,9 +155,9 @@ function useRighting(
   });
 }
 
-function World({ settings, generation }: { settings: Settings; generation: number }) {
+function World({ settings, generation, quality }: { settings: Settings; generation: number; quality: Quality }) {
   const { halfWidth, topY } = useViewBounds();
-  const bots = useMemo(() => getBotGeometries(), []);
+  const bots = useMemo(() => getBotGeometries(quality), [quality]);
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
   useRighting(bodies, settings.righting, settings.gravity, !settings.faceCamera);
   useEffect(() => {
@@ -298,9 +299,20 @@ function Stage({ background }: { background: string }) {
   );
 }
 
+/** Which rasteriser to use: WebGL when the browser allows it, Canvas 2D otherwise. */
+type RendererKind = "webgl" | "canvas2d";
+
+function pickRenderer(webglOk: boolean): RendererKind {
+  // `?renderer=canvas2d` / `?renderer=webgl` force a choice (testing).
+  const forced = typeof location !== "undefined" ? new URLSearchParams(location.search).get("renderer") : null;
+  if (forced === "canvas2d" || forced === "webgl") return forced;
+  return webglOk ? "webgl" : "canvas2d";
+}
+
 export function Scene() {
   const [generation, setGeneration] = useState(0);
   const webgl = useMemo(detectWebGL, []);
+  const renderer = useMemo(() => pickRenderer(webgl.ok), [webgl.ok]);
   const rapier = useRapierReady();
   const globalError = useGlobalErrors();
 
@@ -330,18 +342,6 @@ export function Scene() {
     root.setProperty("--hud-muted", dark ? "#b8b2aa" : "#6c665f");
   }, [background, settings.background]);
 
-  if (!webgl.ok) {
-    return (
-      <StatusOverlay
-        status={{
-          kind: "error",
-          title: "WebGL is not available in this browser",
-          detail: webgl.detail,
-        }}
-      />
-    );
-  }
-
   return (
     <>
       <Canvas
@@ -350,10 +350,15 @@ export function Scene() {
         dpr={[1, 2]}
         camera={{ position: [0, CAMERA_Y, 40], near: 0.1, far: 100 }}
         style={{ touchAction: "none" }}
+        // Without WebGL, hand R3F a Canvas 2D rasteriser instead of a WebGLRenderer.
+        gl={renderer === "canvas2d" ? ({ canvas }) => new Canvas2DRenderer(canvas as HTMLCanvasElement) : undefined}
       >
         <Stage background={background} />
-        {rapier.ready && <World settings={settings} generation={generation} />}
+        {rapier.ready && <World settings={settings} generation={generation} quality={renderer === "canvas2d" ? "low" : "high"} />}
       </Canvas>
+      <div className="renderer-label" data-renderer={renderer}>
+        {renderer === "webgl" ? "Renderer: WebGL" : `Renderer: Canvas 2D${webgl.ok ? "" : " (WebGL unavailable)"}`}
+      </div>
       {globalError ? (
         <StatusOverlay
           status={{

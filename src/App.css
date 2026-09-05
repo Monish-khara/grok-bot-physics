@@ -32,6 +32,16 @@
   color: var(--hud-muted, #6c665f);
 }
 
+.renderer-label {
+  position: absolute;
+  left: 20px;
+  bottom: 14px;
+  pointer-events: none;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--hud-muted, #6c665f);
+}
+
 .status {
   position: absolute;
   left: 50%;

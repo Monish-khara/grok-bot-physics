@@ -214,7 +214,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         onPointerCancel={onPointerUp}
       >
         {bot.eyes.map((g, i) => (
-          <mesh key={i} geometry={g} material={eyeMaterial} />
+          <mesh key={i} geometry={g} material={eyeMaterial} userData={{ eyeNormal: bot.eyeNormals[i] }} />
         ))}
       </mesh>
     </RigidBody>
