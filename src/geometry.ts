@@ -251,6 +251,21 @@ function smoothProfile(profile: readonly Pt2[]): Pt2[] {
   return [...bottom.reverse(), ...body, ...top];
 }
 
+/**
+ * Share vertices across seams and poles (three's sphere/capsule/box builders
+ * duplicate them for UVs, which we don't use) and drop zero-area triangles.
+ * The Canvas 2D renderer traces silhouettes by vertex index, so a clean,
+ * welded index is what keeps its edge bookkeeping exact.
+ */
+function weld(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  g.deleteAttribute("uv");
+  g.deleteAttribute("normal");
+  const merged = mergeVertices(g, 1e-5);
+  if (merged !== g) g.dispose();
+  dropDegenerateTriangles(merged);
+  return merged;
+}
+
 /** Drop triangles that reference the same vertex twice (lathe apex slivers). */
 function dropDegenerateTriangles(g: THREE.BufferGeometry) {
   const idx = g.getIndex();
@@ -549,7 +564,7 @@ export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): Bo
   const sdf = bodySdf(body);
   const scale = WORLD_PER_BODY * eyes.size;
 
-  const geometry = bodyGeometry(body, sdf, q);
+  const geometry = weld(bodyGeometry(body, sdf, q));
   // Raycasting (taps, drags) culls back faces, so every body must wind outward.
   ensureOutwardWinding(geometry);
   geometry.computeVertexNormals();

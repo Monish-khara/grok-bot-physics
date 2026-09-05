@@ -168,6 +168,17 @@ function World({ settings, generation, quality }: { settings: Settings; generati
       __grokBotPositions?: () => { id: string; x: number; y: number; z: number }[];
     };
     w.__grokBotsReady = true;
+    // Test hook: throw every bot into a random orientation (renderer stress tests).
+    (w as { __grokBotRandomize?: () => void }).__grokBotRandomize = () => {
+      for (const b of bodies.current) {
+        if (!b) continue;
+        const q = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2),
+        );
+        b.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+        b.setAngvel({ x: (Math.random() - 0.5) * 6, y: (Math.random() - 0.5) * 6, z: (Math.random() - 0.5) * 6 }, true);
+      }
+    };
     w.__grokBotPositions = () =>
       bodies.current.flatMap((b, i) => {
         if (!b) return [];

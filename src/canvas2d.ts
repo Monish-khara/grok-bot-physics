@@ -10,9 +10,9 @@ import * as THREE from "three";
  * Drawing model, matched to what the bots need (flat unlit fills, no lights):
  * - Orthographic/perspective projection through the camera matrices.
  * - Bodies are painter-sorted by view depth, far to near. Each body is one
- *   `Path2D` made of its front-facing triangles, filled once with the nonzero
- *   rule, so the union is seamless (no hairlines between triangles) and the
- *   silhouette is exactly the mesh's.
+ *   `Path2D` of its silhouette loops — the net boundary of its front-facing
+ *   triangles — filled once with the nonzero rule, so the fill is exactly the
+ *   union of the front faces with no seams and only a few hundred segments.
  * - Eye meshes (children tagged with `userData.eyeNormal`) are drawn right
  *   after their body, only while that normal faces the camera; being flush
  *   inlays, that is when — and only when — they would be visible.
@@ -50,6 +50,14 @@ export class Canvas2DRenderer {
 
   /** Per-phase timings of the last frame (ms), for profiling. */
   phases = { project: 0, path: 0, fill: 0, triangles: 0 };
+  /**
+   * "silhouette" traces only the outline loops (fast); "triangles" emits every
+   * front-facing triangle (slow, but a straightforward ground truth used by
+   * `compareFrame`).
+   */
+  fillMode: "silhouette" | "triangles" = "silhouette";
+  private lastScene: THREE.Scene | null = null;
+  private lastCamera: THREE.Camera | null = null;
 
   setPixelRatio(dpr: number) {
     this.dpr = dpr;
@@ -85,12 +93,53 @@ export class Canvas2DRenderer {
   }
 
   render(scene: THREE.Scene, camera: THREE.Camera) {
+    this.lastScene = scene;
+    this.lastCamera = camera;
+    this.renderTo(this.ctx, this.dpr, scene, camera);
+  }
+
+  /**
+   * Test hook: draw the last frame twice into offscreen canvases — silhouette
+   * loops vs. every front-facing triangle — and count pixels that differ by
+   * more than `threshold` in any channel. Anything beyond antialiasing noise
+   * means a silhouette loop was wrong (a hole or a chord across a body).
+   */
+  compareFrame(threshold = 100): { differing: number; total: number } {
+    if (!this.lastScene || !this.lastCamera) return { differing: 0, total: 0 };
+    const w = Math.max(1, Math.floor(this.width)), h = Math.max(1, Math.floor(this.height));
+    const make = () => {
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      return c.getContext("2d")!;
+    };
+    const a = make(), b = make();
+    const mode = this.fillMode;
+    this.fillMode = "silhouette";
+    this.renderTo(a, 1, this.lastScene, this.lastCamera);
+    this.fillMode = "triangles";
+    this.renderTo(b, 1, this.lastScene, this.lastCamera);
+    this.fillMode = mode;
+    const pa = a.getImageData(0, 0, w, h).data, pb = b.getImageData(0, 0, w, h).data;
+    let differing = 0;
+    for (let i = 0; i < pa.length; i += 4) {
+      if (
+        Math.abs(pa[i] - pb[i]) > threshold ||
+        Math.abs(pa[i + 1] - pb[i + 1]) > threshold ||
+        Math.abs(pa[i + 2] - pb[i + 2]) > threshold
+      )
+        differing++;
+    }
+    return { differing, total: w * h };
+  }
+
+  private renderTo(ctx: CanvasRenderingContext2D, dpr: number, scene: THREE.Scene, camera: THREE.Camera) {
     const t0 = performance.now();
     this.phases.project = this.phases.path = this.phases.fill = this.phases.triangles = 0;
     if (scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();
     if (camera.parent === null && camera.matrixWorldAutoUpdate) camera.updateMatrixWorld();
 
-    const { ctx, dpr, width, height } = this;
+    const { width, height } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const bg = scene.background;
     if (bg instanceof THREE.Color) {
@@ -119,7 +168,7 @@ export class Canvas2DRenderer {
     this.bodies.sort((a, b) => a.depth - b.depth);
 
     for (const { mesh } of this.bodies) {
-      const bodyPath = this.fillMesh(mesh, colorOf(mesh.material));
+      const bodyPath = this.fillMesh(ctx, mesh, colorOf(mesh.material));
       if (!bodyPath) continue;
       for (const child of mesh.children) {
         const eye = child as THREE.Mesh;
@@ -136,7 +185,7 @@ export class Canvas2DRenderer {
         // silhouette stands in for the depth test at grazing angles.
         ctx.save();
         ctx.clip(bodyPath, "nonzero");
-        this.fillMesh(eye, colorOf(eye.material));
+        this.fillMesh(ctx, eye, colorOf(eye.material));
         ctx.restore();
       }
     }
@@ -149,13 +198,14 @@ export class Canvas2DRenderer {
   /**
    * Fill the projection of a mesh's front-facing triangles as one path. Rather
    * than emitting every triangle (each Path2D call costs ~1 µs, so 25k
-   * triangles took >100 ms a frame), only the silhouette is emitted: edges
-   * where a front-facing triangle meets a back-facing one, oriented by the
-   * front triangle's winding and chained into loops. With that orientation
-   * the nonzero winding number at any pixel equals the number of front-facing
-   * layers over it, so the fill is exactly the union of the front faces.
+   * triangles took >100 ms a frame), only the boundary of the front-facing set
+   * is emitted, chained into loops. An earlier version derived it from a
+   * two-triangles-per-edge adjacency; that broke on seams, poles and
+   * non-manifold marching-cubes edges, leaving open chains that `closePath`
+   * shut with a straight chord — a visible wedge cut out of a body. The net
+   * edge sum below is balanced by construction, so loops always close.
    */
-  private fillMesh(mesh: THREE.Mesh, color: string): Path2D | null {
+  private fillMesh(ctx: CanvasRenderingContext2D, mesh: THREE.Mesh, color: string): Path2D | null {
     const geometry = mesh.geometry;
     const position = geometry.attributes.position as THREE.BufferAttribute | undefined;
     if (!position) return null;
@@ -182,7 +232,7 @@ export class Canvas2DRenderer {
 
     // Front/back per triangle. Screen y points down, so a counter-clockwise
     // (front-facing) triangle in NDC has negative signed area here.
-    const { tris, triCount, edgeA, edgeB, edgeL, edgeR } = adj;
+    const { tris, triCount } = adj;
     const front = adj.front;
     for (let t = 0, i = 0; t < triCount; t++, i += 3) {
       const a = tris[i] * 2, b = tris[i + 1] * 2, c = tris[i + 2] * 2;
@@ -190,57 +240,109 @@ export class Canvas2DRenderer {
       front[t] = (out[b] - ax) * (out[c + 1] - ay) - (out[c] - ax) * (out[b + 1] - ay) < 0 ? 1 : 0;
     }
 
-    // Silhouette edges, directed so the front-facing side is consistent.
+    // Net boundary of the front-facing set: every front triangle contributes
+    // its three directed edges; an edge walked both ways (two front
+    // neighbours) cancels. Being a sum of closed triangle boundaries, the
+    // result has as many outgoing as incoming edges at every vertex whatever
+    // the mesh topology (seams, poles, non-manifold marching-cubes output), so
+    // the chains below always close, and its nonzero winding number equals
+    // the number of front layers over a pixel — exactly the union.
+    const { triEdge, triSign, edgeA, edgeB, net } = adj;
+    net.fill(0);
+    for (let t = 0, i = 0; t < triCount; t++, i += 3) {
+      if (!front[t]) continue;
+      net[triEdge[i]] += triSign[i];
+      net[triEdge[i + 1]] += triSign[i + 1];
+      net[triEdge[i + 2]] += triSign[i + 2];
+    }
     const outgoing = this.outgoing;
     outgoing.clear();
     let edges = 0;
-    for (let k = 0; k < edgeA.length; k++) {
-      const fl = front[edgeL[k]];
-      const fr = edgeR[k] >= 0 ? front[edgeR[k]] : 0;
-      if (fl === fr) continue;
-      const from = fl ? edgeA[k] : edgeB[k];
-      const to = fl ? edgeB[k] : edgeA[k];
+    for (let k = 0; k < net.length; k++) {
+      const n = net[k];
+      if (n === 0) continue;
+      const from = n > 0 ? edgeA[k] : edgeB[k];
+      const to = n > 0 ? edgeB[k] : edgeA[k];
       const list = outgoing.get(from);
-      if (list) list.push(to);
-      else outgoing.set(from, [to]);
-      edges++;
+      const copies = Math.abs(n);
+      if (list) for (let c = 0; c < copies; c++) list.push(to);
+      else outgoing.set(from, Array(copies).fill(to));
+      edges += copies;
     }
     const tq = performance.now();
     this.phases.project += tq - tp;
     this.phases.triangles += edges;
     if (!edges) return null;
 
+    if (this.fillMode === "triangles") return this.fillTriangles(ctx, adj, out, color);
+
     // Chain directed edges into closed loops. Every vertex has as many
     // outgoing as incoming silhouette edges, so any unused outgoing edge
-    // continues the walk; a loop closes when it returns to its start.
+    // continues the walk and a walk can only get stuck back at its start.
     const path = new Path2D();
+    let open = false;
     for (const [start, firstList] of outgoing) {
       while (firstList.length) {
         let v = start;
         path.moveTo(out[v * 2], out[v * 2 + 1]);
+        let closed = false;
         for (let guard = 0; guard <= edges; guard++) {
           const list = outgoing.get(v);
           if (!list || !list.length) break;
           v = list.pop()!;
-          if (v === start) break;
+          if (v === start) {
+            closed = true;
+            break;
+          }
           path.lineTo(out[v * 2], out[v * 2 + 1]);
         }
         path.closePath();
+        if (!closed) open = true;
       }
+    }
+    if (open) {
+      // Cannot happen with balanced edges; if it ever does, correctness over
+      // speed: fill every front triangle for this mesh instead.
+      this.unclosedLoops++;
+      return this.fillTriangles(ctx, adj, out, color);
     }
     const tr = performance.now();
     this.phases.path += tr - tq;
-    const ctx = this.ctx;
     ctx.fillStyle = color;
     ctx.fill(path, "nonzero");
     this.phases.fill += performance.now() - tr;
     return path;
   }
 
+  /** Count of silhouette chains that failed to close (expected to stay 0). */
+  unclosedLoops = 0;
+
+  /** Ground truth / fallback: every front-facing triangle, one nonzero fill. */
+  private fillTriangles(ctx: CanvasRenderingContext2D, adj: Adjacency, out: Float32Array, color: string): Path2D {
+    const { tris, triCount, front } = adj;
+    const path = new Path2D();
+    for (let t = 0, i = 0; t < triCount; t++, i += 3) {
+      if (!front[t]) continue;
+      const a = tris[i] * 2, b = tris[i + 1] * 2, c = tris[i + 2] * 2;
+      path.moveTo(out[a], out[a + 1]);
+      path.lineTo(out[b], out[b + 1]);
+      path.lineTo(out[c], out[c + 1]);
+      path.closePath();
+    }
+    ctx.fillStyle = color;
+    ctx.fill(path, "nonzero");
+    return path;
+  }
+
   private adjacencyCache = new Map<THREE.BufferGeometry, Adjacency>();
   private outgoing = new Map<number, number[]>();
 
-  /** Triangle list plus, for every undirected edge, the triangles on each side. Built once per geometry. */
+  /**
+   * Triangle list plus the undirected edge table: for each triangle side, the
+   * edge it lies on and whether it runs along (+1) or against (-1) the edge's
+   * stored direction. Built once per geometry; welded vertex indices are the
+   * keys, never float positions.
+   */
   private adjacency(geometry: THREE.BufferGeometry): Adjacency {
     let adj = this.adjacencyCache.get(geometry);
     if (adj) return adj;
@@ -250,22 +352,23 @@ export class Canvas2DRenderer {
     const tris = new Uint32Array(triCount * 3);
     for (let i = 0; i < triCount * 3; i++) tris[i] = index ? index.getX(i) : i;
     const edgeOf = new Map<number, number>();
-    const edgeA: number[] = [], edgeB: number[] = [], edgeL: number[] = [], edgeR: number[] = [];
+    const edgeA: number[] = [], edgeB: number[] = [];
+    const triEdge = new Uint32Array(triCount * 3);
+    const triSign = new Int8Array(triCount * 3);
     for (let t = 0; t < triCount; t++) {
       for (let s = 0; s < 3; s++) {
         const a = tris[t * 3 + s], b = tris[t * 3 + ((s + 1) % 3)];
-        const key = a < b ? a * vertexCount + b : b * vertexCount + a;
-        const k = edgeOf.get(key);
+        const lo = Math.min(a, b), hi = Math.max(a, b);
+        const key = lo * vertexCount + hi;
+        let k = edgeOf.get(key);
         if (k === undefined) {
-          edgeOf.set(key, edgeA.length);
-          // Stored as the direction it runs in triangle t, with t on the left.
-          edgeA.push(a);
-          edgeB.push(b);
-          edgeL.push(t);
-          edgeR.push(-1);
-        } else if (edgeR[k] < 0) {
-          edgeR[k] = t;
+          k = edgeA.length;
+          edgeOf.set(key, k);
+          edgeA.push(lo);
+          edgeB.push(hi);
         }
+        triEdge[t * 3 + s] = k;
+        triSign[t * 3 + s] = a === lo ? 1 : -1;
       }
     }
     adj = {
@@ -274,8 +377,9 @@ export class Canvas2DRenderer {
       front: new Uint8Array(triCount),
       edgeA: Uint32Array.from(edgeA),
       edgeB: Uint32Array.from(edgeB),
-      edgeL: Uint32Array.from(edgeL),
-      edgeR: Int32Array.from(edgeR),
+      triEdge,
+      triSign,
+      net: new Int16Array(edgeA.length),
     };
     this.adjacencyCache.set(geometry, adj);
     return adj;
@@ -288,8 +392,9 @@ type Adjacency = {
   front: Uint8Array;
   edgeA: Uint32Array;
   edgeB: Uint32Array;
-  edgeL: Uint32Array;
-  edgeR: Int32Array;
+  triEdge: Uint32Array;
+  triSign: Int8Array;
+  net: Int16Array;
 };
 
 function isDrawable(material: THREE.Material | THREE.Material[]): boolean {
