@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import * as THREE from "three";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { CuboidCollider, Physics, RigidBody, type RapierRigidBody } from "@react-three/rapier";
-import { button, useControls } from "leva";
+import { button, folder, useControls } from "leva";
 import { Bot } from "./Bot";
 import { getBotGeometries } from "./geometry";
 import { BOT_HUES, TOKENS } from "./data/tokens";
@@ -22,7 +22,21 @@ const VIEW_HEIGHT = 10;
 const FLOOR_PADDING = 0.6;
 const CAMERA_Y = FLOOR_Y - FLOOR_PADDING + VIEW_HEIGHT / 2;
 /** Stage colour of the Base shapes v2 tool (`--bg: 255 255 255`). */
-const BACKGROUND = "#ffffff";
+const BACKGROUND = { r: 255, g: 255, b: 255 };
+
+type Rgb = { r: number; g: number; b: number };
+
+const toHex = ({ r, g, b }: Rgb) =>
+  "#" + [r, g, b].map((c) => Math.round(Math.max(0, Math.min(255, c))).toString(16).padStart(2, "0")).join("");
+
+/** Relative luminance (sRGB), for picking a readable HUD text colour. */
+const luminance = ({ r, g, b }: Rgb) => {
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+};
 
 type Spawn = {
   position: [number, number, number];
@@ -274,11 +288,11 @@ function World({ settings, generation }: { settings: Settings; generation: numbe
   );
 }
 
-/** The stage is just the tool's white paper: no lights, no floor, no shadows. */
-function Stage() {
+/** The stage is just the tool's paper: a flat colour, no lights, no floor, no shadows. */
+function Stage({ background }: { background: string }) {
   return (
     <>
-      <color attach="background" args={[BACKGROUND]} />
+      <color attach="background" args={[background]} />
       <CameraRig />
     </>
   );
@@ -300,7 +314,22 @@ export function Scene() {
     botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
     faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
+    Look: folder({
+      background: { value: BACKGROUND, label: "background" },
+    }),
   });
+
+  // Paint the page the same colour as the canvas so the two never mismatch
+  // (the canvas can lag a frame on resize, and overlays sit on the page), and
+  // flip the HUD text light or dark to stay readable.
+  const background = toHex(settings.background as Rgb);
+  useEffect(() => {
+    const root = document.documentElement.style;
+    root.setProperty("--stage-bg", background);
+    const dark = luminance(settings.background as Rgb) < 0.4;
+    root.setProperty("--hud-fg", dark ? "#f4f1ec" : "#2a2724");
+    root.setProperty("--hud-muted", dark ? "#b8b2aa" : "#6c665f");
+  }, [background, settings.background]);
 
   if (!webgl.ok) {
     return (
@@ -323,7 +352,7 @@ export function Scene() {
         camera={{ position: [0, CAMERA_Y, 40], near: 0.1, far: 100 }}
         style={{ touchAction: "none" }}
       >
-        <Stage />
+        <Stage background={background} />
         {rapier.ready && <World settings={settings} generation={generation} />}
       </Canvas>
       {globalError ? (

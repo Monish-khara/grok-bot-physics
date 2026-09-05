@@ -44,6 +44,10 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   - `face camera` — off by default (full 3D tumbling). On: bots keep their
     face toward the viewer (no depth travel, spin only about the view axis).
   - `Respawn` — re-drops all ten bots with reshuffled colors.
+  - `Look › background` — RGB colour picker (swatch opens the picker, or type
+    a hex) for the stage. Default white, like the tool. Applies live to both
+    the canvas clear colour and the page behind it; the HUD text flips light
+    on dark backgrounds.
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
 Add `?lineup` to the URL to drop the bots in one evenly spaced, upright row

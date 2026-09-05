@@ -1,7 +1,8 @@
 .app {
   position: fixed;
   inset: 0;
-  background: #ffffff;
+  /* Kept in step with the canvas clear colour by Scene (Leva "background"). */
+  background: var(--stage-bg, #ffffff);
 }
 
 .app canvas {
@@ -14,7 +15,7 @@
   top: 18px;
   left: 20px;
   pointer-events: none;
-  color: #2a2724;
+  color: var(--hud-fg, #2a2724);
   max-width: min(60vw, 420px);
 }
 
@@ -28,7 +29,7 @@
 .hud p {
   margin: 0;
   font-size: 13px;
-  color: #6c665f;
+  color: var(--hud-muted, #6c665f);
 }
 
 .status {
