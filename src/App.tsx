@@ -10,8 +10,8 @@ export default function App() {
         <Scene />
       </SceneErrorBoundary>
       <header className="hud">
-        <h1>Grok Bots · Physics Drop</h1>
-        <p>Tap a bot to bounce it. Tap empty space to scatter the pile.</p>
+        <h1>Grok Bots · Zero-G Bounce</h1>
+        <p>Tap a bot to nudge it. Tap empty space to send everyone a new way.</p>
       </header>
       <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Physics" }} />
     </div>

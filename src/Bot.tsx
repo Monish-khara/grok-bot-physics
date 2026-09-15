@@ -17,7 +17,6 @@ type Props = {
   position: [number, number, number];
   rotation: [number, number, number];
   restitution: number;
-  friction: number;
   /** Keep the face toward the camera: no depth travel, spin only about Z. */
   faceCamera: boolean;
   /** Degrees of spin per pixel of drag, applied as angular velocity. */
@@ -71,7 +70,7 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, friction, faceCamera, dragSpin, scale, onTap },
+  { bot, color, position, rotation, restitution, faceCamera, dragSpin, scale, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
@@ -139,7 +138,8 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
     if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < TAP_SLOP) return;
     if (!d.moved) {
       d.moved = true;
-      // Hold the bot in the air while it is being turned, like a tile in the tool.
+      // Hold the bot still while it is being turned, like a tile in the tool.
+      // Gravity scale 0 doubles as the "being dragged" flag for the speed normaliser.
       b.setGravityScale(0, true);
       b.setLinvel({ x: 0, y: 0, z: 0 }, true);
     }
@@ -168,12 +168,16 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
     if (!b) return;
     if (d.moved) {
       b.setGravityScale(1, true);
-      // Release flick: carry the last drag speed on as spin, capped.
+      // Release flick: carry the last drag speed on as spin, capped, and send
+      // the bot off the way it was flicked (screen y is down, world y is up).
+      // The speed normaliser puts it back on the shared speed next step; a
+      // still release leaves it to pick a random heading.
       const k = (dragSpin * Math.PI) / 180;
       const cap = 12;
       const wx = Math.max(-cap, Math.min(cap, d.vy * k));
       const wy = Math.max(-cap, Math.min(cap, d.vx * k));
       b.setAngvel(faceCamera ? { x: 0, y: 0, z: -wy } : { x: wx, y: wy, z: 0 }, true);
+      b.setLinvel({ x: d.vx, y: -d.vy, z: 0 }, true);
     } else {
       onTap(b);
     }
@@ -189,20 +193,20 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       position={position}
       rotation={rotation}
       restitution={restitution}
-      friction={friction}
-      linearDamping={0.15}
-      angularDamping={1.4}
+      friction={0}
+      linearDamping={0}
+      angularDamping={0}
       enabledTranslations={[true, true, !faceCamera]}
       enabledRotations={[!faceCamera, !faceCamera, true]}
       ccd
-      canSleep
+      canSleep={false}
     >
       {hull ? (
-        <ConvexHullCollider args={[hull]} restitution={restitution} friction={friction} />
+        <ConvexHullCollider args={[hull]} restitution={restitution} friction={0} />
       ) : roundish ? (
-        <BallCollider args={[Math.max(he.x, he.y)]} restitution={restitution} friction={friction} />
+        <BallCollider args={[Math.max(he.x, he.y)]} restitution={restitution} friction={0} />
       ) : (
-        <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={friction} />
+        <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={0} />
       )}
       <mesh
         geometry={bot.geometry}
