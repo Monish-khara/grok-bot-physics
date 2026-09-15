@@ -13,71 +13,93 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
-## This branch: `nesting` — Russian doll
+## This branch: `nesting` — Russian doll shells
 
 Branched from `racetrack` (head `badf622`). The Sphere, its colours and the
-transparent Snapshot stay; the track and the racers go. One dome bot fills
-the Sphere — its silhouette *is* the Sphere's — and every few seconds the
-outer layer spins, lifts, slides off to the side and fades, revealing the
-same dome smaller and in the next token colour underneath. After the
-smallest one, the layers fly back in reverse order and the loop restarts.
-Live at <https://monish-khara.github.io/grok-bot-physics/nesting/>.
+transparent Snapshot stay; the track and the racers go. A stack of hollow
+dome shells sits one inside the next, the outermost filling the Sphere (its
+silhouette *is* the Sphere's) and a solid dome bot at the core. Each shell has
+a round window on its back. Every few seconds the outermost shell turns 180°
+in place so its window comes round to the camera and you look through it at
+the next shell's face and eyes; then that one turns, and so on to the core.
+Then they close again from the inside out, and the loop restarts. Live at
+<https://monish-khara.github.io/grok-bot-physics/nesting/>.
 
-![Mid-peel: the blue outer dome sliding off, the violet layer beneath it](docs/screenshot-nesting.png)
+![Fully open: every shell turned, windows nested, the orange core at the centre](docs/screenshot-nesting.png)
 
 - **Dome body** (`src/data/bodies.ts`, `dome`): none of the ten toolkit
   shapes is a dome, so this branch adds one — the unit sphere sliced flat at
   `y = CHORD` (`-0.42`, the same cut as `src/sphereShape.ts`), built as a
-  surface of revolution from an analytic profile through the existing
-  `revolve` path (the refit closes the tip with a tangent sphere cap, which
-  for a circle is the circle). Scaled to the Sphere's radius with its base on
-  the Sphere's floor it fills the interior exactly: no gap at the base, no
-  grey rim. Eyes are white pills 0.6 R apart and 0.56 R up, as in the
-  reference; because the surface leans back ~40° there, the pills are
-  stretched to read at the reference's proportions from the front and use a
-  new `upright` eye-frame option so their height axis stays vertical on
-  screen instead of splaying with the surface's own up.
-- **Layers:** `layers` (2–10, default 6) copies of the dome. Layer 0 is
-  `bot scale × Sphere radius` (1 = fills it); layer *i* is scaled by
-  `shrink`ⁱ (default 0.82) about the base centre, so every layer stands on
-  the floor. Colours walk the core token ladder from blue (blue, violet,
+  surface of revolution through the existing `revolve` path. Scaled to the
+  Sphere's radius with its base on the Sphere's floor it fills the interior
+  exactly. Eyes are white pills 0.6 R apart and 0.56 R up; the `upright`
+  eye-frame option keeps their height axis vertical on screen (the
+  surface-normal frame would splay a pair set this high on a sphere).
+- **Shell** (`src/shell.ts`): `shell = dome − erode(dome, thickness) − window`,
+  where the erosion leaves a wall `thickness` (default 0.06 of that shell's
+  outer radius, slider) thick including a floor, and the window is a cone
+  about an axis on the back at eye height, `window` degrees wide (default 55,
+  slider 20–100; above ~100 it would cut into the base). The plan called for
+  marching cubes over that SDF; the shell is built from its parts instead —
+  outer and inner spheres about the window axis, the conical rim of the
+  window, the base disc and the cavity floor, plane-clipped at the chord —
+  because that gives exact surfaces at any wall thickness (a 0.06 R wall is
+  one or two grid cells at a resolution the Canvas 2D fallback can paint),
+  crisp per-part tones, ~19k triangles per shell (`high`) or ~3.4k (`low`),
+  and instant rebuilds when a slider moves. Three flat tones are baked as
+  vertex colours: the token colour on the face, 25% toward white on the rim,
+  25% toward black inside; `MeshBasicMaterial` with `vertexColors`, still
+  unlit. Eyes are the dome's own pills (same outer surface), so they go
+  round the back when a shell turns and the depth test hides them.
+- **Layers:** `layers` (2–10, default 6) with the last one the solid dome.
+  Layer 0 is `bot scale × Sphere radius`; layer *i* is scaled by `shrink`ⁱ
+  (0.82). Colours walk the core token ladder from blue (blue, violet,
   magenta, brown, red, orange, yellow, green, cyan — nine hues, so neighbours
-  never match); eyes are white on every layer. Only two figures ever exist:
-  the layer on show and the one in flight. Inner layers are hidden anyway,
-  and coincident bodies would tie the Canvas 2D depth sort.
-- **Peel loop** (`Nesting` in `src/Scene.tsx`): hold `interval` s (2.5),
-  then peel over `peel` s (1.2, ease-in-out): `spin turns` (1.5) about the
-  vertical axis, slide 0.75 R₀ toward one side (alternating per layer) and
-  lift 0.4 R₀, shrink to 85%, lean 0.22 rad into the slide, and fade — solid
-  for the first 40% of the flight so the layer beneath never shows through
-  early, then a smoothstep to 0. The Sphere stage clips whatever leaves it.
-  After the smallest layer shows for `interval`, the layers come back in
-  reverse order along the same path (0.35 s between them) and the loop
-  restarts. **Tap the dome** to peel the layer on show now. Drag-to-rotate
-  is gone on this branch so the spin reads clearly.
-- **Drawing the layer in flight:** it shares a centre with the layer under
-  it, so it must always win. WebGL draws it in `Figure`'s new `overlay` mode:
-  transparent material, no depth test, `renderOrder` above the opaque body,
-  eyes culled by their surface normal (the body can no longer hide the far
-  pair). Canvas 2D already culls eyes by normal and painter-sorts by depth;
-  the flyer sits 0.5 units in front so the sort is never a tie, and
-  `canvas2d.ts` now fills a transparent material at its opacity
-  (`globalAlpha`). `Figure` takes the opacity as a ref (`fade`) read every
-  frame, so the animation never re-renders React.
-- **Leva:** `layers`, `shrink`, `interval (s)`, `peel (s)`, `spin turns`,
-  `play`, `Restart`, `bot scale`, `sphere`, `outside`, `Snapshot`,
-  `snapshot in tab`. `?play=0` starts paused; `?renderer=canvas2d` forces the
-  fallback.
-- **Test hooks:** `window.__grokNesting()` (mode, layer, time in step, which
-  layers are drawn and the flight progress, every layer's radius),
+  never match); eyes are white on every layer. All layers are drawn (you look
+  into them). `align`: `centre` (default) — every shell shares the dome's
+  sphere centre, like the reference — or `floor`, each standing on the
+  Sphere's floor. `tilt` (0–25°, default 10) pitches the whole stack toward
+  the camera so the rims show; it turns the stack, not the camera, so the
+  Sphere stage and its clipping are untouched.
+- **Cascade** (`Nesting` in `src/Scene.tsx`): hold `interval` s (2.5), then
+  the outermost unturned shell turns 180° about its own vertical axis over
+  `turn` s (1.2, ease-in-out); hold; the next turns; … until only the core
+  faces you. Hold, then the shells turn back from the innermost outwards
+  (0.4 s apart) and the loop restarts. Shells are opaque throughout — no
+  fading. **Tap** any layer to end the current hold now. `play`, `Restart`
+  kept; drag-to-rotate is gone so the turns read clearly.
+- **Canvas 2D** (`src/canvas2d.ts`): a silhouette fill cannot show a window
+  with another shell inside it, so bodies flagged `perTriangle` (the shells;
+  `Figure` sets `userData.perTriangle`) go through a global painter: every
+  front-facing triangle of every shell and of its camera-facing eyes is
+  projected, sorted far to near by view depth (quantised into 200 slabs with
+  the colour as tie-break, so one surface paints as one run even where an
+  occluded surface behind it interleaves in depth) and filled with its own
+  baked tone; ordinary silhouette bodies — the core — are slotted into the
+  same order at their centre depth, so the core paints after the shells'
+  back walls and before their front walls. Eyes get a small forward depth
+  bias so they land on top of the face they sit in. Same-colour runs merge
+  into one `Path2D`, and every triangle is grown half a pixel about its
+  centroid, which removes the anti-aliased hairlines abutting fills would
+  leave. Measured ~5 ms a frame for six layers at 1200×900 (`low` quality,
+  ~6.7k triangles after culling).
+- **Leva:** `layers`, `shrink`, `thickness`, `window (°)`, `interval (s)`,
+  `turn (s)`, `tilt (°)`, `align`, `play`, `Restart`, `bot scale`, `sphere`,
+  `outside`, `Snapshot`, `snapshot in tab`. `?play=0` starts paused;
+  `?renderer=canvas2d` forces the fallback.
+- **Test hooks:** `window.__grokNesting()` (mode `open`/`close`, the layer
+  turning, time in step, every layer's turn 0–1 and radius),
   `__grokNestingSet({ layer, mode, t })` to jump the timeline,
   `__grokBotBounds()` (the Sphere), `__grokScene()`. Verified headless at
   1200×900 with SwiftShader WebGL and with the Canvas 2D renderer: `npm run
-  build` and `tsc --noEmit` clean; the full dome fills the Sphere with eyes
-  visible and no gap at the base; mid-peel shows exactly two layers with the
-  outer drawn over the inner; the smallest layer sits on the floor; a 40 s
-  live run walks peel 0→5, rebuild 5→0 and restarts; a tap during a hold
-  jumps to the peel; no console errors.
+  build` and `tsc --noEmit` clean; at rest the outer shell fills the Sphere
+  with eyes visible; mid-turn (0.65 of the outer shell's turn) the window
+  swings in showing the lighter rim, the darker inside and the next shell's
+  face and eye through it, with the eyes on the turning shell gone round the
+  back; fully open, five nested rims frame the core; no z-fighting; a 45 s
+  live run walks open 0→5, close 4→0 and restarts; a tap during a hold jumps
+  to the turn; `align: floor` and a 110° window checked too; no console
+  errors.
 - **Run alongside the other branches:** worktree
   `~/repos/grok-bot-physics-nesting`, port `4736`:
 
