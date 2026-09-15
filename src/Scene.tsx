@@ -615,7 +615,8 @@ function Racers({
   const tan = useMemo(() => new THREE.Vector2(), []);
   const euler = useMemo(() => new THREE.Euler(), []);
   useFrame((_, rawDt) => {
-    const dt = Math.min(rawDt, 1 / 20);
+    // Cap the step so a stalled tab does not teleport the field; slow software GL runs slow-motion instead.
+    const dt = Math.min(rawDt, 0.1);
     const dir = settings.clockwise ? -1 : 1;
     const size = RACER_FRACTION * track.cloudWidth;
     for (let i = 0; i < states.length; i++) {
