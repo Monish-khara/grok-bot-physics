@@ -1,11 +1,12 @@
 name: GitHub Pages
 
-# One static site from four branches:
+# One static site from six branches:
 #   /            sphere    (the Sphere container, Drop | Fly)
 #   /drop/       master    (the original physics drop)
 #   /fly/        fly       (zero-gravity bounce)
 #   /canvas2d/   canvas2d  (Canvas 2D fallback branch)
 #   /racetrack/  racetrack (cloud racetrack: true offset-path strokes, kinematic racers)
+#   /nesting/    nesting   (Russian doll: the dome peels off layer by layer)
 #   /variants/   index linking all of them
 # A push to any of these branches rebuilds the whole site from each branch's
 # current head. GitHub only runs push workflows that exist on the pushed
@@ -13,7 +14,7 @@ name: GitHub Pages
 
 on:
   push:
-    branches: [master, sphere, fly, canvas2d, racetrack]
+    branches: [master, sphere, fly, canvas2d, racetrack, nesting]
   workflow_dispatch:
 
 permissions:
@@ -41,6 +42,8 @@ jobs:
             path: canvas2d/
           - branch: racetrack
             path: racetrack/
+          - branch: nesting
+            path: nesting/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,6 +84,10 @@ jobs:
         with:
           name: site-racetrack
           path: site/racetrack
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-nesting
+          path: site/nesting
       - name: Variants index
         run: |
           mkdir -p site/variants
@@ -113,6 +120,7 @@ jobs:
               <li><a href="../fly/"><b>Fly</b><span>zero-gravity screensaver bounce (branch <code>fly</code>)</span></a></li>
               <li><a href="../canvas2d/"><b>Canvas 2D</b><span>drop with the no-WebGL renderer fallback (branch <code>canvas2d</code>)</span></a></li>
               <li><a href="../racetrack/"><b>Cloud Racetrack</b><span>the cloud in the Sphere with true offset-path track strokes and nine racers (branch <code>racetrack</code>)</span></a></li>
+              <li><a href="../nesting/"><b>Russian Doll</b><span>a dome bot fills the Sphere and peels off layer by layer, each smaller and a new colour (branch <code>nesting</code>)</span></a></li>
             </ul>
           </main>
           </body>
