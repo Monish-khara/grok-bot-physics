@@ -85,8 +85,8 @@ curve).
   headless (1280×800) with WebGL disabled (Canvas 2D) and with SwiftShader
   WebGL: 60 s of Fly with no bot centre outside the truncated circle and
   speeds within 0.001 of the target; 30 s of Drop with all ten asleep on the
-  base and none through the arc; five mode toggles with ten bodies, no
-  console errors and a flat JS heap.
+  base and none through the arc; five mode toggles with ten bodies inside
+  the shape after each and no console errors.
 
 ## This branch: `fly` — zero-gravity bounce
 
