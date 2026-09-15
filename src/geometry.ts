@@ -524,6 +524,7 @@ function eyeGeometry(
   width: number,
   height: number,
   q: QualitySpec,
+  upright = false,
 ): { geometry: THREE.BufferGeometry; normal: THREE.Vector3 } {
   const { p, n } = frontSurface(sdf, cx, cy);
   const outline = stadium(width, height, q.eyeSegments);
@@ -537,12 +538,21 @@ function eyeGeometry(
   const g = mergeVertices(extruded, 1e-6);
   extruded.dispose();
   // Local frame: pill height along the body's up as seen on the surface,
-  // extrusion along the outward normal.
-  const up = new THREE.Vector3(0, 1, 0);
-  const u = new THREE.Vector3().crossVectors(up, n);
-  if (u.lengthSq() < 1e-6) u.set(1, 0, 0);
-  u.normalize();
-  const v = new THREE.Vector3().crossVectors(n, u).normalize();
+  // extrusion along the outward normal. `upright` instead picks the tangent
+  // direction with no sideways component, so the height axis projects
+  // vertically from the front however far round the surface the eye sits.
+  const u = new THREE.Vector3();
+  const v = new THREE.Vector3();
+  if (upright && Math.hypot(n.y, n.z) > 1e-6) {
+    v.set(0, n.z, -n.y).normalize();
+    u.crossVectors(v, n).normalize();
+  } else {
+    const up = new THREE.Vector3(0, 1, 0);
+    u.crossVectors(up, n);
+    if (u.lengthSq() < 1e-6) u.set(1, 0, 0);
+    u.normalize();
+    v.crossVectors(n, u).normalize();
+  }
   const m = new THREE.Matrix4().makeBasis(u, v, n);
   m.setPosition(p.clone().addScaledVector(n, -EYE_BELOW));
   g.applyMatrix4(m);
@@ -551,7 +561,7 @@ function eyeGeometry(
 }
 
 function eyeGeometries(sdf: Sdf, f: EyeFormation, q: QualitySpec) {
-  return [-1, 1].map((side) => eyeGeometry(sdf, f.shiftX + (side * f.gap) / 2, f.shiftY, f.width, f.height, q));
+  return [-1, 1].map((side) => eyeGeometry(sdf, f.shiftX + (side * f.gap) / 2, f.shiftY, f.width, f.height, q, f.upright));
 }
 
 // ── Assembly ─────────────────────────────────────────────────────────────────

@@ -39,6 +39,11 @@ export type EyeFormation = {
   /** Pair centre offset from the body centre; y up. */
   shiftX: number;
   shiftY: number;
+  /**
+   * Keep the pills' height axis vertical on screen instead of following the
+   * surface's own up (which splays a pair set high on a sphere). Default off.
+   */
+  upright?: boolean;
 };
 
 export type BotBody = { body: BodyDef; eyes: EyeFormation };
@@ -1329,10 +1334,10 @@ export const BODIES: Record<ShapeId, BotBody> = {
     // the tangent sphere cap, which for a circle is the circle itself.
     body: { kind: "revolve", profile: domeProfile() },
     // Eyes sit high on the dome (reference: pills about 0.6 R up, 0.6 R
-    // apart). The pill lies in the tangent plane there, which leans back
-    // ~37°, so the height is stretched to read as the reference's from the
-    // front.
-    eyes: { size: 1, width: 0.25, height: 0.56, gap: 0.6, shiftX: 0, shiftY: 0.5 },
+    // apart, 0.26 R wide, 0.4 R tall). The pill lies in the tangent plane
+    // there, which leans back ~40°, so the height is stretched to read as the
+    // reference's from the front, and the pills are kept upright on screen.
+    eyes: { size: 1, width: 0.26, height: 0.5, gap: 0.6, shiftX: 0, shiftY: 0.56, upright: true },
   },
 };
 

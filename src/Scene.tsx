@@ -305,6 +305,8 @@ const LIFT = 0.4;
 const PEEL_SCALE = 0.85;
 /** Lean into the slide, radians at the end. */
 const LEAN = 0.22;
+/** Eased progress at which the peeled layer starts to fade. */
+const FADE_FROM = 0.4;
 /** The moving layer sits a little in front so the Canvas 2D painter's sort is never a tie. */
 const MOVER_Z = 0.5;
 /** Pointer travel (px) below which a press counts as a tap. */
@@ -386,13 +388,7 @@ function Nesting({
   const still = useMemo(() => new THREE.Vector3(), []);
 
   // Restart (button or layer-count change) puts layer 0 back on show.
-  useEffect(() => {
-    const s = stateRef.current;
-    s.layer = 0;
-    s.mode = "peel";
-    s.t = 0;
-    setShown({ base: 0, mover: null });
-  }, [generation, n, stateRef]);
+  const resetFor = useRef<string | null>(null);
 
   /** World radius of layer `i`. */
   const radius = (i: number) => settings.botScale * sphere.r * Math.pow(settings.shrink, i);
@@ -401,6 +397,13 @@ function Nesting({
 
   useFrame((_, rawDt) => {
     const s = stateRef.current;
+    const key = `${generation}/${n}`;
+    if (resetFor.current !== key) {
+      resetFor.current = key;
+      s.layer = 0;
+      s.mode = "peel";
+      s.t = 0;
+    }
     if (settings.play) step(s, Math.min(rawDt, 0.1), n, settings);
     const v = visibleLayers(s, n, settings);
     if (v.base !== shown.base || v.mover !== shown.mover) setShown({ base: v.base, mover: v.mover });
@@ -431,7 +434,10 @@ function Nesting({
         euler.set(0, settings.spinTurns * Math.PI * 2 * e, -dir * LEAN * e, "ZYX");
         mover.quaternion.setFromEuler(euler);
         mover.scale.setScalar(meshScale(r));
-        moverFade.current = 1 - e * e;
+        // Solid while it starts to turn and lift (the layer under it must not
+        // show through yet), then fades out over the rest of the flight.
+        const f = Math.max(0, Math.min(1, (e - FADE_FROM) / (1 - FADE_FROM)));
+        moverFade.current = 1 - f * f * (3 - 2 * f);
       }
     }
   });
@@ -520,17 +526,20 @@ function Framed({
   const bots = useMemo(() => getBotGeometries(quality), [quality]);
   const dome = useMemo(() => bots.find((b) => b.shape.id === "dome")!, [bots]);
   const state = useRef<NestState>({ layer: 0, mode: "peel", t: 0 });
+  const scene = useThree((s) => s.scene);
 
   useEffect(() => {
     // Test hooks for the headless checks.
     const w = window as unknown as {
       __grokBotsReady?: boolean;
       __grokBotBounds?: () => Sphere;
+      __grokScene?: () => THREE.Scene;
       __grokNesting?: () => NestState & { layers: number } & Visible & { radius: number[] };
       __grokNestingSet?: (s: Partial<NestState>) => void;
     };
     w.__grokBotsReady = true;
     w.__grokBotBounds = () => sphere;
+    w.__grokScene = () => scene;
     w.__grokNesting = () => {
       const s = state.current;
       const n = Math.max(2, Math.round(settings.layers));
@@ -542,7 +551,7 @@ function Framed({
       };
     };
     w.__grokNestingSet = (s) => Object.assign(state.current, s);
-  }, [sphere, settings]);
+  }, [sphere, scene, settings]);
 
   return (
     <>
