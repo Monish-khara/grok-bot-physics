@@ -598,6 +598,8 @@ function Cloud({
       eye.mesh.scale.y = lid;
       eye.mesh.position.y = eye.centreY * (1 - lid);
     }
+    // Test hook: the live breath and lid, for the headless checks.
+    (window as unknown as { __grokCloud?: unknown }).__grokCloud = { sx, sy, bob, lid, x: g.position.x, y: g.position.y };
   });
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
