@@ -4,7 +4,7 @@ import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber"
 import { button, useControls } from "leva";
 import { getBotGeometries, type BotGeometry, type Quality } from "./geometry";
 import { Figure } from "./Figure";
-import { buildShellBot } from "./shell";
+import { WINDOW_DEG, buildShellBot } from "./shell";
 import { Canvas2DRenderer } from "./canvas2d";
 import { BOT_HUES, TOKENS, type TokenName } from "./data/tokens";
 import { StatusOverlay, detectWebGL, useGlobalErrors } from "./Status";
@@ -286,6 +286,8 @@ type NestSettings = {
   shrink: number;
   /** Shell wall, as a fraction of that shell's outer radius. */
   thickness: number;
+  /** Full width of each shell's window, degrees. */
+  window: number;
   /** Seconds a state is held before the next shell turns. */
   interval: number;
   /** Seconds one 180° turn takes. */
@@ -390,8 +392,8 @@ function Nesting({
 
   // One shell geometry per colour (tones are baked as vertex colours); the core reuses the solid dome.
   const shells = useMemo(
-    () => colors.slice(0, n - 1).map((c) => buildShellBot(dome, settings.thickness, c, quality)),
-    [dome, settings.thickness, colors, n, quality],
+    () => colors.slice(0, n - 1).map((c) => buildShellBot(dome, settings.thickness, settings.window, c, quality)),
+    [dome, settings.thickness, settings.window, colors, n, quality],
   );
   useEffect(() => () => shells.forEach((s) => s.geometry.dispose()), [shells]);
 
@@ -559,6 +561,8 @@ export function Scene() {
     layers: { value: 6, min: 2, max: 10, step: 1 },
     shrink: { value: 0.82, min: 0.6, max: 0.95, step: 0.01 },
     thickness: { value: 0.06, min: 0.02, max: 0.2, step: 0.005 },
+    // Above ~100° the window would start to cut into the base slab.
+    window: { value: WINDOW_DEG, min: 20, max: 100, step: 5, label: "window (°)" },
     interval: { value: 2.5, min: 0.2, max: 10, step: 0.1, label: "interval (s)" },
     turn: { value: 1.2, min: 0.2, max: 5, step: 0.1, label: "turn (s)" },
     tilt: { value: 10, min: 0, max: 25, step: 1, label: "tilt (°)" },
@@ -579,6 +583,7 @@ export function Scene() {
       layers: controls.layers,
       shrink: controls.shrink,
       thickness: controls.thickness,
+      window: controls.window,
       interval: controls.interval,
       turn: controls.turn,
       tilt: controls.tilt,
@@ -590,6 +595,7 @@ export function Scene() {
       controls.layers,
       controls.shrink,
       controls.thickness,
+      controls.window,
       controls.interval,
       controls.turn,
       controls.tilt,

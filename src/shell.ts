@@ -25,7 +25,7 @@ import { CHORD } from "./sphereShape";
  * are baked as vertex colours; the material stays flat and unlit.
  */
 
-/** Full angular width of the window, degrees. */
+/** Default full angular width of the window, degrees. */
 export const WINDOW_DEG = 55;
 
 export type ShellTones = { face: string; rim: string; inside: string };
@@ -164,13 +164,13 @@ function disc(y: number, rho: number, seg: { phi: number }): Tri[] {
 
 /**
  * The shell's triangles in body units with a part tag each. `thickness` is
- * a fraction of the outer radius.
+ * a fraction of the outer radius, `windowDeg` the window's full width.
  */
-export function shellParts(thickness: number, quality: Quality): { tris: Tri[]; parts: ShellPart[] } {
+export function shellParts(thickness: number, windowDeg: number, quality: Quality): { tris: Tri[]; parts: ShellPart[] } {
   const seg = SEGMENTS[quality];
   const t = Math.max(0.01, Math.min(0.4, thickness));
   const rIn = 1 - t;
-  const half = (WINDOW_DEG / 2) * (Math.PI / 180);
+  const half = (Math.max(10, Math.min(160, windowDeg)) / 2) * (Math.PI / 180);
   // Orthonormal frame with the window axis as its z: x stays the body's x.
   const d = windowAxis();
   const ax = new THREE.Vector3(1, 0, 0);
@@ -216,9 +216,9 @@ export function shellParts(thickness: number, quality: Quality): { tris: Tri[]; 
  * one flat colour per triangle, the dome's own eyes (same outer surface) and
  * the dome's world scale so the two line up.
  */
-export function buildShellBot(dome: BotGeometry, thickness: number, color: string, quality: Quality): BotGeometry {
+export function buildShellBot(dome: BotGeometry, thickness: number, windowDeg: number, color: string, quality: Quality): BotGeometry {
   const tones = shellTones(color);
-  const { tris, parts } = shellParts(thickness, quality);
+  const { tris, parts } = shellParts(thickness, windowDeg, quality);
   const positions = new Float32Array(tris.length * 9);
   const colors = new Float32Array(tris.length * 9);
   const c = new THREE.Color();
