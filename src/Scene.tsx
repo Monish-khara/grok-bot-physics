@@ -241,6 +241,11 @@ function Righting({
     const step = Math.min(dt, 1 / 30);
     for (const body of bodies.current ?? []) {
       if (!body || body.gravityScale() === 0) continue; // being dragged
+      // A bot that has come to rest stays at rest: the torque never wakes a
+      // sleeping body, and is applied without resetting the sleep timer, so
+      // a slab rocking on its face under the torque can settle and sleep
+      // instead of jiggling forever. Taps and scatters still wake everything.
+      if (body.isSleeping()) continue;
       const r = body.rotation();
       tmpQ.set(-r.x, -r.y, -r.z, r.w);
       if (tmpQ.w < 0) tmpQ.set(-tmpQ.x, -tmpQ.y, -tmpQ.z, -tmpQ.w);
@@ -255,7 +260,7 @@ function Righting({
       const inertia = body.principalInertia();
       const radius = Math.sqrt(Math.max(inertia.x, inertia.y, inertia.z) / (0.4 * m));
       const torque = angle * gain * m * g * radius * step;
-      body.applyTorqueImpulse({ x: tmpAxis.x * torque, y: tmpAxis.y * torque, z: tmpAxis.z * torque }, true);
+      body.applyTorqueImpulse({ x: tmpAxis.x * torque, y: tmpAxis.y * torque, z: tmpAxis.z * torque }, false);
     }
   });
   return null;
