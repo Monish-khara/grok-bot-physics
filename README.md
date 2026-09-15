@@ -66,9 +66,29 @@ curve).
     tweaks persist when switching back and forth. Switching respawns the
     troop under the new rules and swaps the physics live.
 - **Kept:** tap impulse, empty-click scatter, drag-to-rotate and flick,
-  `bot scale`, `face camera`, `Respawn`, `Snapshot` (the PNG is the whole
-  framed Sphere including the outside colour) and the WebGL / Canvas 2D
+  `bot scale`, `face camera`, `Respawn`, `Snapshot` and the WebGL / Canvas 2D
   auto-detect.
+- **Snapshot is just the Sphere:** the PNG is the interior colour with the
+  bots, trails and blur inside it, and everything outside the truncated
+  circle is fully transparent (alpha 0, no `outside` colour), cropped to the
+  shape's bounding box at native pixel size (2052×1457 for a 1280×800 window
+  at 2×) — drop it straight onto any background. The arc's edge is
+  anti-aliased.
+  - *Canvas 2D:* the renderer redraws the last frame into an offscreen canvas
+    with no outside fill (`Canvas2DRenderer.snapshot()`), reusing the live
+    trail history without advancing it, then keys the whole frame through an
+    ordinary anti-aliased fill of the shape path (`destination-in`), so the
+    edge is soft even where a browser's `clip()` is not.
+  - *WebGL:* one frame is drawn with the screen cleared to alpha 0 instead of
+    the outside colour, so only the MSAA-edged Sphere mesh (textured with the
+    trail render target) lands in the drawing buffer; it is copied into the
+    cropped canvas and the normal frame is drawn straight back, so nothing
+    flashes on screen.
+  - `snapshot in tab` and `window.__grokLastSnapshot` work as before. Verified
+    headless in both renderers at 1× and 2×: all four corners alpha 0, the
+    opaque fraction of the PNG equals the truncated circle's share of its
+    bounding box (83.8% vs 84.0%), a band of partial-alpha pixels along the
+    arc, interior colour and bots present.
 - **Run alongside the other branches:** worktree `~/repos/grok-bot-physics-sphere`,
   port `4734` (`master` 4731, `canvas2d` 4732, `fly` 4733):
 
@@ -165,7 +185,9 @@ trails and blur exactly as drawn — at the render canvas's native pixel size
 (so 2× on a Retina display: 2560×1600 for a 1280×800 window). The HUD title,
 renderer label and Leva panel are DOM, not canvas, so they are never in it,
 and the background is baked in (opaque). Filename
-`grok-bots-YYYYMMDD-HHMMSS.png` (local time).
+`grok-bots-YYYYMMDD-HHMMSS.png` (local time). (On `sphere` the PNG is
+instead the Sphere alone on a transparent background, cropped to the shape —
+see that section.)
 
 - Canvas 2D: the bitmap persists between frames, so it is read straight off
   with `canvas.toBlob`. WebGL: the drawing buffer is not preserved, so one
@@ -279,8 +301,9 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   - `face camera` — off by default (full 3D tumbling). On: bots keep their
     face toward the viewer (no depth travel, spin only about the view axis).
   - `Respawn` — re-spreads all ten bots with new headings and reshuffled colors.
-  - `Snapshot` — downloads the scene as a PNG (see above); `snapshot in tab`
-    opens it in a new tab instead, for browsers that block downloads.
+  - `Snapshot` — downloads the Sphere alone as a transparent-background PNG
+    cropped to the shape (see above); `snapshot in tab` opens it in a new tab
+    instead, for browsers that block downloads.
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
 Add `?lineup` to the URL to start the bots in one evenly spaced, upright row
