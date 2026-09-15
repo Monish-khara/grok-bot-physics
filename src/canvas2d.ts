@@ -29,6 +29,9 @@ import * as THREE from "three";
  *   along its screen-space velocity (`mesh.userData.velocity`, world units/s,
  *   written by the scene) with decreasing alpha, then drawn solid on top.
  */
+/** A closed polyline in world units (x, y pairs) stroked at a world-unit width. */
+export type StageStroke = { points: Float32Array; width: number; color: string };
+
 export class Canvas2DRenderer {
   readonly domElement: HTMLCanvasElement;
   readonly isCanvas2DRenderer = true;
@@ -42,7 +45,7 @@ export class Canvas2DRenderer {
    * pairs) filled with `inside`; everything else is `outside`, and bodies,
    * trails and blur are clipped to the polygon. Null: flat scene background.
    */
-  stage: { outline: Float32Array; inside: string; outside: string } | null = null;
+  stage: { outline: Float32Array; inside: string; outside: string; strokes?: StageStroke[] } | null = null;
   /** Extra fills drawn last frame for trails and blur, for profiling. */
   ghostFills = 0;
 
@@ -218,6 +221,32 @@ export class Canvas2DRenderer {
       // Nothing drawn from here on may leave the frame.
       ctx.save();
       ctx.clip(frame);
+      // Track strokes: closed polylines in world units, stroked with round
+      // joins at a world-unit width, behind everything but the interior.
+      if (stage.strokes?.length) {
+        this.tmpV.set(0, 0, 0);
+        this.project(this.tmpV);
+        const ox = this.tmpV.x;
+        this.tmpV.set(1, 0, 0);
+        this.project(this.tmpV);
+        const pxPerUnit = Math.abs(this.tmpV.x - ox);
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        for (const stroke of stage.strokes) {
+          const path = new Path2D();
+          const p = stroke.points;
+          for (let i = 0; i < p.length; i += 2) {
+            this.tmpV.set(p[i], p[i + 1], 0);
+            this.project(this.tmpV);
+            if (i === 0) path.moveTo(this.tmpV.x, this.tmpV.y);
+            else path.lineTo(this.tmpV.x, this.tmpV.y);
+          }
+          path.closePath();
+          ctx.strokeStyle = stroke.color;
+          ctx.lineWidth = Math.max(0.5, stroke.width * pxPerUnit);
+          ctx.stroke(path);
+        }
+      }
     } else {
       const bg = scene.background;
       if (bg instanceof THREE.Color) {

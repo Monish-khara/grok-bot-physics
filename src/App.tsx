@@ -10,8 +10,8 @@ export default function App() {
         <Scene />
       </SceneErrorBoundary>
       <header className="hud">
-        <h1>Grok Bots · Sphere</h1>
-        <p>Drop or Fly (panel). Tap a bot to kick it, tap empty space to scatter, drag to turn.</p>
+        <h1>Grok Bots · Cloud Racetrack</h1>
+        <p>Tap a racer to boost it. Tap the cloud to wobble it, drag it to turn it.</p>
       </header>
       <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Physics" }} />
     </div>

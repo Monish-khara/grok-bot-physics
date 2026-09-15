@@ -587,6 +587,22 @@ export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): Bo
   };
 }
 
+/**
+ * Exact signed distance to a bot's front silhouette in its own body units,
+ * i.e. its 3D SDF on the plane z = 0. Lofts and slabs are the drawn outline
+ * itself (not the gridded copy the 3D fill uses), so iso-lines of this
+ * function are true offset curves of the shape. Also returns the outline
+ * polygon when there is one.
+ */
+export function botSilhouette(id: BotShape["id"]): { sdf: (x: number, y: number) => number; outline: readonly Pt2[] | null } {
+  const { body: rawBody } = BODIES[id];
+  const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
+  if (body.kind === "loft") return { sdf: polygonSdf(body.ring), outline: body.ring };
+  if (body.kind === "slab") return { sdf: polygonSdf(body.loop), outline: body.loop };
+  const sdf = bodySdf(body);
+  return { sdf: (x, y) => sdf(x, y, 0), outline: null };
+}
+
 const cache = new Map<Quality, BotGeometry[]>();
 
 /** Builds all ten bodies once per quality; later calls (respawns, rescales) reuse them. */

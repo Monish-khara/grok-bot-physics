@@ -1,45 +1,33 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { CuboidCollider, Physics, RigidBody, useAfterPhysicsStep, type RapierRigidBody } from "@react-three/rapier";
 import { button, useControls } from "leva";
-import { Bot } from "./Bot";
-import { getBotGeometries, type Quality } from "./geometry";
-import { Canvas2DRenderer } from "./canvas2d";
+import { botSilhouette, getBotGeometries, type BotGeometry, type Quality } from "./geometry";
+import { Figure } from "./Figure";
+import { Canvas2DRenderer, type StageStroke } from "./canvas2d";
 import { BOT_HUES, TOKENS } from "./data/tokens";
-import { StatusOverlay, detectWebGL, useGlobalErrors, useRapierReady } from "./Status";
-import {
-  ARC_SEGMENTS,
-  chordHalfLength,
-  fitSphere,
-  insideSphere,
-  sphereOutline,
-  sphereWallSegments,
-  type Sphere,
-} from "./sphereShape";
+import { StatusOverlay, detectWebGL, useGlobalErrors } from "./Status";
+import { fitSphere, sphereOutline, type Sphere } from "./sphereShape";
+import { ClosedCurve, offsetCurve, ribbonGeometry, sampleField, transformLoop, type Loop } from "./racetrack";
 
-/**
- * Front-to-back thickness of the play space at bot scale 1. Shallow, so the
- * troop stays in one depth band. Scales with the bots so a 2x troop still
- * fits between the front and back walls.
- */
-const SLAB_DEPTH = 3.2;
-/** Typical bot diameter in world units at bot scale 1, for spawn spacing. */
-const BOT_SIZE = 1.6;
 /** World units visible top-to-bottom; width follows the aspect ratio. */
 const VIEW_HEIGHT = 10;
 const CAMERA_Y = VIEW_HEIGHT / 2;
 /** Clearance between the Sphere and the viewport edge, world units. */
 const SPHERE_MARGIN = 0.45;
-/** Reference image colours: light grey Sphere on a dark grey field. */
+/** Reference image colours: light grey Sphere on a dark grey field, green cloud and track. */
 const SPHERE_COLOR = "#d9d9d9";
 const OUTSIDE_COLOR = "#4a4a4a";
-/**
- * Fraction of the flight direction allowed front-to-back. The slab is thin,
- * so a mostly-planar direction keeps the bots from rattling between the
- * front and back walls.
- */
-const DEPTH_MIX = 0.25;
+const CLOUD_COLOR = "#2ecc5c";
+/** The cloud's width as a fraction of the Sphere's width. */
+const CLOUD_FRACTION = 0.4;
+/** A racer's size as a fraction of the cloud's width. */
+const RACER_FRACTION = 0.12;
+/** Depth of the track ribbons (WebGL): behind the racers, which sit at z = 0. */
+const TRACK_Z = -1.5;
+/** Body-unit grid for the iso-line extraction: cells per axis over ±extent. */
+const ISO_RES = 224;
+const ISO_POINTS = 320;
 
 /** Relative luminance (sRGB) of a hex colour, for picking a readable HUD text colour. */
 const luminance = (hex: string) => {
@@ -47,88 +35,13 @@ const luminance = (hex: string) => {
   return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 };
 
-type Vec3 = [number, number, number];
-
-type Spawn = {
-  position: Vec3;
-  rotation: Vec3;
-  /** Unit flight direction; scaled to the `speed` setting when the body appears (Fly). */
-  direction: Vec3;
-  /** Angular velocity as a fraction of the `spin` setting, per axis (Fly). */
-  spin: Vec3;
-};
-
-type Mode = "Drop" | "Fly";
-
 const QUERY = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
-/** `?lineup` parks the troop in one evenly spaced, upright row — for screenshots. */
-const LINEUP = QUERY.has("lineup");
-/** `?mode=fly` / `?mode=drop` picks the starting mode (default Drop). */
-const START_MODE: Mode = QUERY.get("mode")?.toLowerCase() === "fly" ? "Fly" : "Drop";
-/** `?trail=0.8&blur=1` preset the Fly effect sliders (screenshots, headless checks). */
+/** `?trail=0.8&blur=1` preset the effect sliders (screenshots, headless checks). */
 const fromQuery = (name: string, fallback: number, max: number) => {
   const v = Number(QUERY.get(name));
   return QUERY.has(name) && Number.isFinite(v) ? Math.min(max, Math.max(0, v)) : fallback;
 };
 
-/** A random unit vector, mostly in the view plane (see DEPTH_MIX). */
-function randomDirection(planar: boolean): Vec3 {
-  const a = Math.random() * Math.PI * 2;
-  const z = planar ? 0 : (Math.random() * 2 - 1) * DEPTH_MIX;
-  const r = Math.sqrt(1 - z * z);
-  return [Math.cos(a) * r, Math.sin(a) * r, z];
-}
-
-function randomSpin(planar: boolean): Vec3 {
-  const mag = 0.4 + Math.random() * 0.6;
-  if (planar) return [0, 0, (Math.random() < 0.5 ? -1 : 1) * mag];
-  const d = randomDirection(false);
-  return [d[0] * mag, d[1] * mag, d[2] * mag];
-}
-
-/**
- * Rejection-sample spawn positions inside the Sphere, clear of the walls and
- * of each other. Drop mode samples the upper part so the fall is visible.
- */
-function sphereSpawns(count: number, sphere: Sphere, faceCamera: boolean, scale: number, mode: Mode): Spawn[] {
-  const size = BOT_SIZE * scale;
-  const inset = size * 0.7;
-  const depthRoom = Math.max(0, (SLAB_DEPTH * scale) / 2 - size * 0.5);
-  if (LINEUP) {
-    const half = chordHalfLength(sphere) - size * 0.6;
-    return Array.from({ length: count }, (_, i) => ({
-      position: [sphere.cx - half + (2 * half * (i + 0.5)) / count, sphere.cy, 0],
-      rotation: [0, 0, 0],
-      direction: randomDirection(true),
-      spin: [0, 0, 0],
-    }));
-  }
-  const yMin = mode === "Drop" ? sphere.cy : sphere.chordY + inset;
-  const yMax = sphere.cy + sphere.r - inset;
-  const placed: [number, number][] = [];
-  return Array.from({ length: count }, () => {
-    let x = sphere.cx, y = sphere.cy;
-    for (let attempt = 0; attempt < 400; attempt++) {
-      x = sphere.cx + (Math.random() * 2 - 1) * (sphere.r - inset);
-      y = yMin + Math.random() * Math.max(0, yMax - yMin);
-      if (!insideSphere(sphere, x, y, inset)) continue;
-      // Relax the spacing as attempts run out, so small Spheres still fill.
-      const gap = size * (attempt < 200 ? 1 : 0.6);
-      if (placed.every(([px, py]) => Math.hypot(px - x, py - y) >= gap)) break;
-    }
-    placed.push([x, y]);
-    return {
-      position: [x, y, faceCamera ? 0 : (Math.random() * 2 - 1) * depthRoom],
-      rotation: [
-        faceCamera ? 0 : (Math.random() - 0.5) * 0.9,
-        faceCamera ? 0 : (Math.random() - 0.5) * 1.4,
-        (Math.random() - 0.5) * 0.8,
-      ],
-      direction: randomDirection(faceCamera),
-      spin: randomSpin(faceCamera),
-    };
-  });
-}
 
 /**
  * Orthographic camera looking straight down -Z at the play plane. Zoom is set
@@ -156,337 +69,6 @@ function useSphere(): Sphere {
   }, [size.width, size.height]);
 }
 
-/** Physics and effect settings resolved for the active mode. */
-type Physics = {
-  mode: Mode;
-  gravity: number;
-  restitution: number;
-  friction: number;
-  linearDamping: number;
-  angularDamping: number;
-  righting: number;
-  speed: number;
-  spin: number;
-  trail: number;
-  blur: number;
-  impulse: number;
-  faceCamera: boolean;
-  dragSpin: number;
-  botScale: number;
-};
-
-/**
- * Fly mode's screensaver rule: after every physics step, put each free-flying
- * bot back on exactly `speed`. Elastic bounces and bot-bot collisions are
- * never quite lossless in the solver, so without this the troop slowly
- * stalls or runs away. A bot that has come to rest is sent off in a fresh
- * random direction. Spin is capped at `spin` so collisions cannot pump it up.
- */
-function SpeedNormaliser({
-  bodies,
-  speed,
-  spin,
-  planar,
-}: {
-  bodies: React.RefObject<(RapierRigidBody | null)[]>;
-  speed: number;
-  spin: number;
-  planar: boolean;
-}) {
-  useAfterPhysicsStep(() => {
-    for (const body of bodies.current ?? []) {
-      if (!body || body.gravityScale() === 0) continue; // being dragged
-      const v = body.linvel();
-      const mag = Math.hypot(v.x, v.y, v.z);
-      if (mag < 1e-3) {
-        const d = randomDirection(planar);
-        body.setLinvel({ x: d[0] * speed, y: d[1] * speed, z: d[2] * speed }, true);
-      } else if (Math.abs(mag - speed) > speed * 1e-4) {
-        const k = speed / mag;
-        body.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true);
-      }
-      const w = body.angvel();
-      const wmag = Math.hypot(w.x, w.y, w.z);
-      if (wmag > spin) {
-        const k = spin / wmag;
-        body.setAngvel({ x: w.x * k, y: w.y * k, z: w.z * k }, true);
-      }
-    }
-  });
-  return null;
-}
-
-const tmpQ = new THREE.Quaternion();
-const tmpAxis = new THREE.Vector3();
-
-/**
- * Drop mode's weeble torque: swings each bot back toward its rest pose (face
- * to the camera, eyes upright) after it tumbles. Rotation stays fully free —
- * this only decides where they settle, so the eyes end up readable.
- */
-function Righting({
-  bodies,
-  gain,
-  gravity,
-  enabled,
-}: {
-  bodies: React.RefObject<(RapierRigidBody | null)[]>;
-  gain: number;
-  gravity: number;
-  enabled: boolean;
-}) {
-  useFrame((_, dt) => {
-    if (!enabled || gain <= 0) return;
-    const g = Math.max(gravity, 4);
-    const step = Math.min(dt, 1 / 30);
-    for (const body of bodies.current ?? []) {
-      if (!body || body.gravityScale() === 0) continue; // being dragged
-      // A bot that has come to rest stays at rest: the torque never wakes a
-      // sleeping body, and is applied without resetting the sleep timer, so
-      // a slab rocking on its face under the torque can settle and sleep
-      // instead of jiggling forever. Taps and scatters still wake everything.
-      if (body.isSleeping()) continue;
-      const r = body.rotation();
-      tmpQ.set(-r.x, -r.y, -r.z, r.w);
-      if (tmpQ.w < 0) tmpQ.set(-tmpQ.x, -tmpQ.y, -tmpQ.z, -tmpQ.w);
-      const sinHalf = Math.hypot(tmpQ.x, tmpQ.y, tmpQ.z);
-      if (sinHalf < 0.02) continue;
-      const angle = 2 * Math.atan2(sinHalf, tmpQ.w);
-      tmpAxis.set(tmpQ.x / sinHalf, tmpQ.y / sinHalf, tmpQ.z / sinHalf);
-      // Torque scaled to the body's own weight and size, so it can tip a cube
-      // resting on a face (gravity moment ≈ m·g·r) but stays proportional
-      // for light or small bodies. Radius recovered from the inertia tensor.
-      const m = body.mass();
-      const inertia = body.principalInertia();
-      const radius = Math.sqrt(Math.max(inertia.x, inertia.y, inertia.z) / (0.4 * m));
-      const torque = angle * gain * m * g * radius * step;
-      body.applyTorqueImpulse({ x: tmpAxis.x * torque, y: tmpAxis.y * torque, z: tmpAxis.z * torque }, false);
-    }
-  });
-  return null;
-}
-
-function World({
-  physics,
-  sphere,
-  generation,
-  quality,
-  webgl,
-}: {
-  physics: Physics;
-  sphere: Sphere;
-  generation: number;
-  quality: Quality;
-  webgl: boolean;
-}) {
-  const bots = useMemo(() => getBotGeometries(quality), [quality]);
-  const bodies = useRef<(RapierRigidBody | null)[]>([]);
-  // Bodies whose spawn velocity has been applied; the ref callback fires on every render.
-  const launched = useRef(new WeakSet<RapierRigidBody>());
-  const fly = physics.mode === "Fly";
-  useEffect(() => {
-    // Test hooks: let headless checks know the bots are in the world and
-    // where each one is (world units, y up; the camera looks down -Z).
-    const w = window as unknown as {
-      __grokBotsReady?: boolean;
-      __grokBotPositions?: () => { id: string; x: number; y: number; z: number }[];
-      __grokBotVelocities?: () => { id: string; x: number; y: number; z: number; speed: number }[];
-      __grokBotBounds?: () => Sphere & { mode: Mode };
-      __grokBotRandomize?: () => void;
-    };
-    w.__grokBotsReady = true;
-    // Test hook: throw every bot into a random orientation (renderer stress tests).
-    w.__grokBotRandomize = () => {
-      for (const b of bodies.current) {
-        if (!b) continue;
-        const q = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2),
-        );
-        b.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
-        b.setAngvel({ x: (Math.random() - 0.5) * 6, y: (Math.random() - 0.5) * 6, z: (Math.random() - 0.5) * 6 }, true);
-      }
-    };
-    w.__grokBotPositions = () =>
-      bodies.current.flatMap((b, i) => {
-        if (!b) return [];
-        const p = b.translation();
-        return [{ id: bots[i].shape.id, x: p.x, y: p.y, z: p.z }];
-      });
-    w.__grokBotVelocities = () =>
-      bodies.current.flatMap((b, i) => {
-        if (!b) return [];
-        const v = b.linvel();
-        return [{ id: bots[i].shape.id, x: v.x, y: v.y, z: v.z, speed: Math.hypot(v.x, v.y, v.z) }];
-      });
-    w.__grokBotBounds = () => ({ ...sphere, mode: physics.mode });
-  }, [bots, sphere, physics.mode]);
-
-  const spawns = useMemo(
-    () => sphereSpawns(bots.length, sphere, physics.faceCamera, physics.botScale, physics.mode),
-    // Re-roll on respawn only (a mode switch bumps the generation); resizing
-    // or moving a slider shouldn't re-scatter the troop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bots.length, generation],
-  );
-
-  const colors = useMemo(() => {
-    const hues = [...BOT_HUES];
-    for (let i = hues.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [hues[i], hues[j]] = [hues[j], hues[i]];
-    }
-    return bots.map((_, i) => TOKENS[hues[i % hues.length]]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bots, generation]);
-
-  /** Fly: give a freshly created body its spawn heading and spin, once. */
-  const launch = useCallback(
-    (body: RapierRigidBody, spawn: Spawn) => {
-      if (launched.current.has(body)) return;
-      launched.current.add(body);
-      if (!fly) return;
-      const [dx, dy, dz] = spawn.direction;
-      body.setLinvel({ x: dx * physics.speed, y: dy * physics.speed, z: dz * physics.speed }, true);
-      body.setAngvel({ x: spawn.spin[0] * physics.spin, y: spawn.spin[1] * physics.spin, z: spawn.spin[2] * physics.spin }, true);
-    },
-    [fly, physics.speed, physics.spin],
-  );
-
-  // Mass grows with the cube of the scale; scale impulses the same way so a
-  // tap moves a 2x bot as much as a 1x one.
-  const massFactor = physics.botScale ** 3;
-
-  // Tap. Drop: kick it upward with a little spin. Fly: a shove in a random
-  // direction (the normaliser puts it back on `speed`, so the heading changes).
-  const tap = useCallback(
-    (body: RapierRigidBody) => {
-      const s = physics.impulse * massFactor;
-      if (fly) {
-        const d = randomDirection(physics.faceCamera);
-        body.applyImpulse({ x: d[0] * s, y: d[1] * s, z: d[2] * s }, true);
-      } else {
-        body.applyImpulse({ x: (Math.random() - 0.5) * s * 0.3, y: s, z: 0 }, true);
-      }
-      body.applyTorqueImpulse(
-        physics.faceCamera
-          ? { x: 0, y: 0, z: (Math.random() - 0.5) * s * 0.6 }
-          : { x: (Math.random() - 0.5) * s * 0.4, y: (Math.random() - 0.5) * s * 0.4, z: (Math.random() - 0.5) * s * 0.6 },
-        true,
-      );
-    },
-    [fly, physics.impulse, massFactor, physics.faceCamera],
-  );
-
-  // Empty-space click. Drop: radial burst from the point. Fly: every bot
-  // picks a new random heading and spin.
-  const scatter = useCallback(
-    (e: ThreeEvent<PointerEvent>) => {
-      if (fly) {
-        for (const body of bodies.current) {
-          if (!body || body.gravityScale() === 0) continue;
-          const d = randomDirection(physics.faceCamera);
-          const w = randomSpin(physics.faceCamera);
-          body.setLinvel({ x: d[0] * physics.speed, y: d[1] * physics.speed, z: d[2] * physics.speed }, true);
-          body.setAngvel({ x: w[0] * physics.spin, y: w[1] * physics.spin, z: w[2] * physics.spin }, true);
-        }
-        return;
-      }
-      const origin = e.point;
-      const strength = physics.impulse * 1.6 * massFactor;
-      for (const body of bodies.current) {
-        if (!body) continue;
-        const p = body.translation();
-        const dx = p.x - origin.x;
-        const dy = p.y - origin.y;
-        const dz = p.z - origin.z;
-        const dist = Math.max(0.6, Math.hypot(dx, dy, dz));
-        const falloff = Math.min(1, 4 / dist);
-        const k = (strength * falloff) / dist;
-        body.applyImpulse({ x: dx * k, y: Math.abs(dy) * k + strength * 0.25 * falloff, z: dz * k * 0.3 }, true);
-        body.applyTorqueImpulse(
-          { x: (Math.random() - 0.5) * strength * 0.3, y: (Math.random() - 0.5) * strength * 0.3, z: (Math.random() - 0.5) * strength * 0.3 },
-          true,
-        );
-      }
-    },
-    [fly, physics.speed, physics.spin, physics.impulse, massFactor, physics.faceCamera],
-  );
-
-  // The slab widens live when bots grow, but only narrows on Respawn: pulling
-  // the front/back walls in past bots that are already sitting deep would
-  // leave them outside the box. So track the largest scale since the spawn.
-  const [slabScale, setSlabScale] = useState(physics.botScale);
-  useEffect(() => {
-    setSlabScale((s) => Math.max(s, physics.botScale));
-  }, [physics.botScale]);
-  useEffect(() => {
-    setSlabScale(physics.botScale);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generation]);
-
-  const wallT = 0.3;
-  const slabDepth = SLAB_DEPTH * Math.max(slabScale, physics.botScale);
-  const walls = useMemo(() => sphereWallSegments(sphere, wallT, ARC_SEGMENTS), [sphere]);
-  const baseHalf = chordHalfLength(sphere);
-  // Oversize the flat colliders well past the shape so nothing slips past a corner.
-  const pad = 6;
-
-  return (
-    <Physics gravity={[0, -physics.gravity, 0]} timeStep={1 / 60}>
-      {fly ? (
-        <SpeedNormaliser bodies={bodies} speed={physics.speed} spin={physics.spin} planar={physics.faceCamera} />
-      ) : (
-        <Righting bodies={bodies} gain={physics.righting} gravity={physics.gravity} enabled={!physics.faceCamera} />
-      )}
-
-      {/* The Sphere: a ring of thin boxes along the arc, a flat base along the chord, and shallow front/back planes. */}
-      <RigidBody type="fixed" friction={physics.friction} restitution={physics.restitution}>
-        {walls.map((w, i) => (
-          <CuboidCollider
-            key={i}
-            args={[w.halfLength, wallT, slabDepth + pad]}
-            position={[w.x, w.y, 0]}
-            rotation={[0, 0, w.angle]}
-          />
-        ))}
-        <CuboidCollider args={[baseHalf + pad, wallT, slabDepth + pad]} position={[sphere.cx, sphere.chordY - wallT, 0]} />
-        <CuboidCollider args={[sphere.r + pad, sphere.r + pad, wallT]} position={[sphere.cx, sphere.cy, -slabDepth / 2 - wallT]} />
-        <CuboidCollider args={[sphere.r + pad, sphere.r + pad, wallT]} position={[sphere.cx, sphere.cy, slabDepth / 2 + wallT]} />
-      </RigidBody>
-
-      {bots.map((bot, i) => (
-        <Bot
-          key={`${generation}-${bot.shape.id}`}
-          ref={(b) => {
-            bodies.current[i] = b;
-            if (b) launch(b, spawns[i]);
-          }}
-          bot={bot}
-          color={colors[i]}
-          position={spawns[i].position}
-          rotation={spawns[i].rotation}
-          restitution={physics.restitution}
-          friction={physics.friction}
-          linearDamping={physics.linearDamping}
-          angularDamping={physics.angularDamping}
-          canSleep={!fly}
-          faceCamera={physics.faceCamera}
-          dragSpin={physics.dragSpin}
-          scale={physics.botScale}
-          blur={webgl ? physics.blur : 0}
-          onTap={tap}
-        />
-      ))}
-
-      {/* Click-catcher for empty space: an invisible plane behind the slab. */}
-      <mesh position={[0, CAMERA_Y, -6]} onPointerDown={scatter}>
-        <planeGeometry args={[400, 400]} />
-        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-      </mesh>
-    </Physics>
-  );
-}
-
 /** Trail persistence at `trail = 1`, seconds (matches canvas2d.ts). */
 const TRAIL_SECONDS = 2;
 
@@ -494,15 +76,29 @@ const TRAIL_SECONDS = 2;
 type DrawFrame = (dt: number, transparentOutside?: boolean) => void;
 
 /** Hands the Sphere backdrop and the effect strengths to the Canvas 2D renderer. */
-function Canvas2DStage({ sphere, inside, outside, trail, blur }: { sphere: Sphere; inside: string; outside: string; trail: number; blur: number }) {
+function Canvas2DStage({
+  sphere,
+  inside,
+  outside,
+  strokes,
+  trail,
+  blur,
+}: {
+  sphere: Sphere;
+  inside: string;
+  outside: string;
+  strokes: StageStroke[];
+  trail: number;
+  blur: number;
+}) {
   const gl = useThree((s) => s.gl) as unknown as Canvas2DRenderer;
   const outline = useMemo(() => sphereOutline(sphere), [sphere]);
   useEffect(() => {
     if (!gl.isCanvas2DRenderer) return;
-    gl.stage = { outline, inside, outside };
+    gl.stage = { outline, inside, outside, strokes };
     gl.effects.trail = trail;
     gl.effects.blur = blur;
-  }, [gl, outline, inside, outside, trail, blur]);
+  }, [gl, outline, inside, outside, strokes, trail, blur]);
   return null;
 }
 
@@ -751,6 +347,330 @@ function Snapshot({
   return null;
 }
 
+
+
+// ── Track ───────────────────────────────────────────────────────────────────
+
+type TrackSettings = {
+  /** Inner stroke distance from the cloud silhouette, as a fraction of the cloud's width. */
+  offset: number;
+  /** Lane width (inner to outer stroke), same units. */
+  width: number;
+  /** Stroke width, same units. */
+  stroke: number;
+};
+
+type Track = {
+  cloud: BotGeometry;
+  /** World units per cloud body unit, at the displayed size. */
+  worldPerBody: number;
+  /** Uniform scale the cloud Figure is drawn at. */
+  cloudScale: number;
+  cloudWidth: number;
+  centre: THREE.Vector2;
+  /** Offset curves in world units. */
+  inner: Loop;
+  outer: Loop;
+  centreline: ClosedCurve;
+  /** Distances from the silhouette, world units. */
+  d1: number;
+  d2: number;
+  strokeWidth: number;
+  /** The cloud's outline polygon in world units, for checks. */
+  outline: Loop | null;
+};
+
+/**
+ * Fit the cloud to the Sphere and derive the track from its silhouette SDF.
+ * Everything is computed in cloud body units (so the iso-line grid is
+ * sampled once, at build time) and mapped to world units at the end.
+ */
+function useTrack(cloud: BotGeometry, sphere: Sphere, settings: TrackSettings): Track {
+  const silhouette = useMemo(() => botSilhouette("cloud"), []);
+  // Body-unit width of the cloud and a grid wide enough for the largest offset the sliders allow.
+  const bodyHalfW = cloud.halfExtents.x / cloud.scale;
+  const bodyHalfH = cloud.halfExtents.y / cloud.scale;
+  const bodyWidth = 2 * bodyHalfW;
+  const field = useMemo(() => {
+    const extent = Math.max(bodyHalfW, bodyHalfH) + bodyWidth * 0.9 + 0.3;
+    return sampleField(silhouette.sdf, extent, ISO_RES);
+  }, [silhouette, bodyHalfW, bodyHalfH, bodyWidth]);
+
+  return useMemo(() => {
+    const cloudWidth = CLOUD_FRACTION * 2 * sphere.r;
+    const cloudScale = cloudWidth / (2 * cloud.halfExtents.x);
+    const worldPerBody = cloud.scale * cloudScale;
+    // Centre the cloud in the Sphere's bounding box.
+    const centre = new THREE.Vector2(sphere.cx, (sphere.chordY + sphere.cy + sphere.r) / 2);
+    const d1b = settings.offset * bodyWidth;
+    const d2b = d1b + settings.width * bodyWidth;
+    const dcb = (d1b + d2b) / 2;
+    const curve = (d: number) => {
+      const loop = offsetCurve(field, silhouette.sdf, d, ISO_POINTS) ?? new Float32Array(0);
+      return transformLoop(loop, worldPerBody, centre.x, centre.y);
+    };
+    const inner = curve(d1b);
+    const outer = curve(d2b);
+    const centreline = new ClosedCurve(curve(dcb));
+    const outline = silhouette.outline
+      ? transformLoop(Float32Array.from(silhouette.outline.flat()), worldPerBody, centre.x, centre.y)
+      : null;
+    return {
+      cloud,
+      worldPerBody,
+      cloudScale,
+      cloudWidth,
+      centre,
+      inner,
+      outer,
+      centreline,
+      d1: d1b * worldPerBody,
+      d2: d2b * worldPerBody,
+      strokeWidth: settings.stroke * bodyWidth * worldPerBody,
+      outline,
+    };
+  }, [cloud, sphere, settings.offset, settings.width, settings.stroke, field, silhouette, bodyWidth]);
+}
+
+/** WebGL: the two strokes as flat ribbons behind the racers. */
+function TrackRibbons({ track, color }: { track: Track; color: string }) {
+  const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
+  useEffect(() => () => material.dispose(), [material]);
+  const geometries = useMemo(
+    () => [ribbonGeometry(track.inner, track.strokeWidth, TRACK_Z), ribbonGeometry(track.outer, track.strokeWidth, TRACK_Z)],
+    [track],
+  );
+  useEffect(() => () => geometries.forEach((g) => g.dispose()), [geometries]);
+  return (
+    <>
+      {geometries.map((g, i) => (
+        <mesh key={i} geometry={g} material={material} userData={{ ghost: true }} />
+      ))}
+    </>
+  );
+}
+
+// ── Cloud ───────────────────────────────────────────────────────────────────
+
+/** Pointer travel (px) below which a press counts as a tap, not a drag. */
+const TAP_SLOP = 6;
+const X_AXIS = new THREE.Vector3(1, 0, 0);
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+const qYaw = new THREE.Quaternion();
+const qPitch = new THREE.Quaternion();
+const qWobble = new THREE.Quaternion();
+const ZERO = new THREE.Vector3();
+
+type Drag = { id: number; x0: number; y0: number; moved: boolean; q0: THREE.Quaternion };
+
+/**
+ * The cloud: fixed at the centre, face to the camera. Drag turns it like a
+ * tile in the tool (yaw with horizontal drag, pitch with vertical); a tap
+ * gives it a damped squash-and-stretch wobble. The track never moves.
+ */
+function Cloud({ track, color, dragSpin, blur }: { track: Track; color: string; dragSpin: number; blur: number }) {
+  const group = useRef<THREE.Group | null>(null);
+  const drag = useRef<Drag | null>(null);
+  /** Rest pose (set by dragging) and the time since the last tap. */
+  const pose = useRef(new THREE.Quaternion());
+  const wobble = useRef(Infinity);
+
+  useFrame((_, dt) => {
+    const g = group.current;
+    if (!g) return;
+    g.position.set(track.centre.x, track.centre.y, 0);
+    wobble.current += dt;
+    const t = wobble.current;
+    if (t < 1.6) {
+      const env = Math.exp(-3.2 * t);
+      const sq = 0.14 * Math.sin(t * 22) * env;
+      g.scale.set(track.cloudScale * (1 + sq), track.cloudScale * (1 - sq), track.cloudScale);
+      qWobble.setFromAxisAngle(Z_AXIS, 0.06 * Math.sin(t * 17) * env);
+      g.quaternion.copy(qWobble).multiply(pose.current);
+    } else {
+      g.scale.setScalar(track.cloudScale);
+      g.quaternion.copy(pose.current);
+    }
+  });
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    drag.current = { id: e.pointerId, x0: e.clientX, y0: e.clientY, moved: false, q0: pose.current.clone() };
+  };
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    if (!d.moved && Math.hypot(dx, dy) < TAP_SLOP) return;
+    d.moved = true;
+    const k = (dragSpin * Math.PI) / 180;
+    qYaw.setFromAxisAngle(Y_AXIS, dx * k);
+    qPitch.setFromAxisAngle(X_AXIS, dy * k);
+    pose.current.copy(qPitch).multiply(qYaw).multiply(d.q0);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    drag.current = null;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    if (!d.moved) wobble.current = 0;
+  };
+
+  return (
+    <Figure
+      ref={group}
+      bot={track.cloud}
+      color={color}
+      scale={1}
+      blur={blur}
+      velocity={ZERO}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+    />
+  );
+}
+
+// ── Racers ──────────────────────────────────────────────────────────────────
+
+type RacerSettings = {
+  count: number;
+  speed: number;
+  variance: number;
+  clockwise: boolean;
+  blur: number;
+};
+
+/** Seconds a tap boost lasts and how much faster it goes at its peak. */
+const BOOST_SECONDS = 1.6;
+const BOOST_GAIN = 1.4;
+
+type RacerState = {
+  /** Arc length along the centreline. */
+  s: number;
+  /** Per-racer speed multiplier, 1 ± variance. */
+  factor: number;
+  /** Seconds of boost remaining. */
+  boost: number;
+  /** Bob phase. */
+  phase: number;
+  velocity: THREE.Vector3;
+  prev: THREE.Vector3;
+};
+
+/**
+ * The nine other bots as kinematic racers riding the lane centreline:
+ * position = centreline(s), heading from the tangent (they lean into the
+ * travel and turn a little toward it), a light bob, even starting gaps.
+ * Speeds differ per racer so they overtake; a tap gives a short boost.
+ */
+function Racers({
+  bots,
+  track,
+  colors,
+  settings,
+  generation,
+  scale,
+  bodiesRef,
+}: {
+  bots: BotGeometry[];
+  track: Track;
+  colors: string[];
+  settings: RacerSettings;
+  generation: number;
+  scale: number;
+  bodiesRef: React.RefObject<RacerState[]>;
+}) {
+  const groups = useRef<(THREE.Group | null)[]>([]);
+  const n = Math.min(settings.count, bots.length);
+  const live = useMemo(() => bots.slice(0, n), [bots, n]);
+
+  // (Re)space the field evenly and re-roll the speed factors.
+  const states = useMemo(() => {
+    const L = track.centreline.length;
+    return live.map((_, i) => ({
+      s: (L * i) / Math.max(1, n),
+      factor: 1 + (Math.random() * 2 - 1) * settings.variance,
+      boost: 0,
+      phase: Math.random() * Math.PI * 2,
+      velocity: new THREE.Vector3(),
+      prev: new THREE.Vector3(NaN, NaN, NaN),
+    }));
+    // Re-roll on respawn, count or variance change only; a slider nudge to
+    // speed or the track must not reshuffle the field.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, n, settings.variance, generation]);
+  useEffect(() => {
+    bodiesRef.current = states;
+  }, [states, bodiesRef]);
+
+  const p = useMemo(() => new THREE.Vector2(), []);
+  const tan = useMemo(() => new THREE.Vector2(), []);
+  const euler = useMemo(() => new THREE.Euler(), []);
+  useFrame((_, rawDt) => {
+    const dt = Math.min(rawDt, 1 / 20);
+    const dir = settings.clockwise ? -1 : 1;
+    const size = RACER_FRACTION * track.cloudWidth;
+    for (let i = 0; i < states.length; i++) {
+      const st = states[i];
+      const g = groups.current[i];
+      if (!g) continue;
+      if (st.boost > 0) st.boost = Math.max(0, st.boost - dt);
+      const boost = 1 + BOOST_GAIN * (st.boost / BOOST_SECONDS);
+      st.s += dir * settings.speed * st.factor * boost * dt;
+      track.centreline.pointAt(st.s, p);
+      track.centreline.tangentAt(st.s, tan);
+      // Bob: a little hop per unit travelled, scaled to the racer.
+      const bob = 0.06 * size * Math.abs(Math.sin(st.s * (2.2 / size) + st.phase));
+      g.position.set(p.x, p.y + bob, 0);
+      // Lean into the travel direction (tilt the top the way it is going) and
+      // yaw slightly toward it, keeping the face mostly to the camera.
+      const tx = tan.x * dir;
+      euler.set(0, 0.45 * tx, -0.28 * tx, "YXZ");
+      g.quaternion.setFromEuler(euler);
+      if (Number.isNaN(st.prev.x)) st.prev.copy(g.position);
+      st.velocity.copy(g.position).sub(st.prev).divideScalar(Math.max(dt, 1e-3));
+      st.prev.copy(g.position);
+    }
+  });
+
+  const press = useRef<{ i: number; x: number; y: number } | null>(null);
+  const onDown = (i: number) => (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    press.current = { i, x: e.clientX, y: e.clientY };
+  };
+  const onUp = (i: number) => (e: ThreeEvent<PointerEvent>) => {
+    const pr = press.current;
+    press.current = null;
+    if (!pr || pr.i !== i || Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > TAP_SLOP) return;
+    states[i].boost = BOOST_SECONDS;
+  };
+
+  return (
+    <>
+      {live.map((bot, i) => (
+        <Figure
+          key={`${bot.shape.id}-${generation}`}
+          ref={(g) => {
+            groups.current[i] = g;
+          }}
+          bot={bot}
+          color={colors[i]}
+          scale={scale / Math.max(bot.halfExtents.x, bot.halfExtents.y)}
+          blur={settings.blur}
+          velocity={states[i].velocity}
+          onPointerDown={onDown(i)}
+          onPointerUp={onUp(i)}
+        />
+      ))}
+    </>
+  );
+}
+
+// ── Scene ───────────────────────────────────────────────────────────────────
+
 /** Which rasteriser to use: WebGL when the browser allows it, Canvas 2D otherwise. */
 type RendererKind = "webgl" | "canvas2d";
 
@@ -761,47 +681,113 @@ function pickRenderer(webglOk: boolean): RendererKind {
   return webglOk ? "webgl" : "canvas2d";
 }
 
+type Look = {
+  inside: string;
+  outside: string;
+  cloud: string;
+  stroke: string;
+  trail: number;
+  blur: number;
+  dragSpin: number;
+};
+
 /** Inner component so the Sphere fit (which needs the canvas size) can be shared. */
 function Framed({
-  physics,
-  inside,
-  outside,
+  look,
+  trackSettings,
+  racerSettings,
   generation,
   renderer,
-  ready,
   drawRef,
   captureRef,
   snapshotInTab,
 }: {
-  physics: Physics;
-  inside: string;
-  outside: string;
+  look: Look;
+  trackSettings: TrackSettings;
+  racerSettings: RacerSettings;
   generation: number;
   renderer: RendererKind;
-  ready: boolean;
   drawRef: React.RefObject<DrawFrame | null>;
   captureRef: React.RefObject<(() => void) | null>;
   snapshotInTab: boolean;
 }) {
   const sphere = useSphere();
+  const quality: Quality = renderer === "canvas2d" ? "low" : "high";
+  const bots = useMemo(() => getBotGeometries(quality), [quality]);
+  const cloud = useMemo(() => bots.find((b) => b.shape.id === "cloud")!, [bots]);
+  const racers = useMemo(() => bots.filter((b) => b.shape.id !== "cloud"), [bots]);
+  const track = useTrack(cloud, sphere, trackSettings);
+  const colors = useMemo(() => {
+    const hues = [...BOT_HUES];
+    for (let i = hues.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [hues[i], hues[j]] = [hues[j], hues[i]];
+    }
+    return racers.map((_, i) => TOKENS[hues[i % hues.length]]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [racers, generation]);
+  const racerStates = useRef<RacerState[]>([]);
+  const racerScale = (RACER_FRACTION * track.cloudWidth) / 2;
+
+  const strokes = useMemo<StageStroke[]>(
+    () => [
+      { points: track.inner, width: track.strokeWidth, color: look.stroke },
+      { points: track.outer, width: track.strokeWidth, color: look.stroke },
+    ],
+    [track, look.stroke],
+  );
+
+  useEffect(() => {
+    // Test hooks for the headless checks: where things are, in world units.
+    const w = window as unknown as {
+      __grokBotsReady?: boolean;
+      __grokBotPositions?: () => { id: string; x: number; y: number; z: number }[];
+      __grokBotBounds?: () => Sphere;
+      __grokTrack?: () => unknown;
+      __grokRacers?: () => { id: string; s: number; factor: number; boost: number }[];
+    };
+    w.__grokBotsReady = true;
+    w.__grokBotBounds = () => sphere;
+    w.__grokBotPositions = () =>
+      racerStates.current.map((st, i) => ({ id: racers[i].shape.id, x: st.prev.x, y: st.prev.y, z: st.prev.z }));
+    w.__grokRacers = () => racerStates.current.map((st, i) => ({ id: racers[i].shape.id, s: st.s, factor: st.factor, boost: st.boost }));
+    w.__grokTrack = () => ({
+      centre: { x: track.centre.x, y: track.centre.y },
+      cloudWidth: track.cloudWidth,
+      worldPerBody: track.worldPerBody,
+      d1: track.d1,
+      d2: track.d2,
+      strokeWidth: track.strokeWidth,
+      racerSize: RACER_FRACTION * track.cloudWidth,
+      inner: Array.from(track.inner),
+      outer: Array.from(track.outer),
+      centreline: Array.from(track.centreline.pts),
+      outline: track.outline ? Array.from(track.outline) : null,
+    });
+  }, [sphere, track, racers]);
+
   return (
     <>
       <CameraRig />
       <Snapshot sphere={sphere} captureRef={captureRef} drawRef={drawRef} openInTab={snapshotInTab} />
       {renderer === "webgl" ? (
-        <WebGLStage sphere={sphere} inside={inside} outside={outside} trail={physics.trail} drawRef={drawRef} />
+        <>
+          <WebGLStage sphere={sphere} inside={look.inside} outside={look.outside} trail={look.trail} drawRef={drawRef} />
+          <TrackRibbons track={track} color={look.stroke} />
+        </>
       ) : (
-        <Canvas2DStage sphere={sphere} inside={inside} outside={outside} trail={physics.trail} blur={physics.blur} />
+        <Canvas2DStage sphere={sphere} inside={look.inside} outside={look.outside} strokes={strokes} trail={look.trail} blur={look.blur} />
       )}
-      {ready && (
-        <World
-          physics={physics}
-          sphere={sphere}
-          generation={generation}
-          quality={renderer === "canvas2d" ? "low" : "high"}
-          webgl={renderer === "webgl"}
-        />
-      )}
+      <Cloud track={track} color={look.cloud} dragSpin={look.dragSpin} blur={renderer === "webgl" ? look.blur : 0} />
+      <Racers
+        bots={racers}
+        track={track}
+        colors={colors}
+        settings={{ ...racerSettings, blur: renderer === "webgl" ? look.blur : 0 }}
+        generation={generation}
+        scale={racerScale}
+        bodiesRef={racerStates}
+      />
     </>
   );
 }
@@ -810,82 +796,63 @@ export function Scene() {
   const [generation, setGeneration] = useState(0);
   const webgl = useMemo(detectWebGL, []);
   const renderer = useMemo(() => pickRenderer(webgl.ok), [webgl.ok]);
-  const rapier = useRapierReady();
   const globalError = useGlobalErrors();
   const captureRef = useRef<(() => void) | null>(null);
   const drawRef = useRef<DrawFrame | null>(null);
 
-  // Each mode has its own sliders (shown only in that mode), so tweaks
-  // persist when switching back and forth.
-  const isDrop = (get: (k: string) => unknown) => get("mode") === "Drop";
-  const isFly = (get: (k: string) => unknown) => get("mode") === "Fly";
   const settings = useControls({
-    mode: { value: START_MODE, options: ["Drop", "Fly"] as Mode[] },
+    cloudColor: { value: CLOUD_COLOR, label: "cloud colour" },
     sphere: { value: SPHERE_COLOR, label: "sphere" },
     outside: { value: OUTSIDE_COLOR, label: "outside" },
-    // Drop
-    dropGravity: { value: 9.8, min: 0, max: 40, step: 0.1, label: "gravity", render: isDrop },
-    dropBounce: { value: 0.4, min: 0, max: 1, step: 0.01, label: "bounce", render: isDrop },
-    friction: { value: 0.6, min: 0, max: 1.5, step: 0.01, render: isDrop },
-    righting: { value: 1, min: 0, max: 3, step: 0.05, label: "face seeking", render: isDrop },
-    // Fly
-    speed: { value: 6, min: 0.5, max: 20, step: 0.5, render: isFly },
-    spin: { value: 1.5, min: 0, max: 8, step: 0.1, render: isFly },
-    flyBounce: { value: 1, min: 0, max: 1, step: 0.01, label: "bounce", render: isFly },
-    trail: { value: fromQuery("trail", 0.6, 1), min: 0, max: 1, step: 0.01, render: isFly },
-    blur: { value: fromQuery("blur", 0.7, 1), min: 0, max: 1, step: 0.01, render: isFly },
-    // Shared
-    impulse: { value: 9, min: 1, max: 30, step: 0.5, label: "impulse strength" },
+    trackOffset: { value: 0.16, min: 0.03, max: 0.5, step: 0.005, label: "track offset" },
+    trackWidth: { value: 0.17, min: 0.05, max: 0.4, step: 0.005, label: "track width" },
+    strokeWidth: { value: 0.012, min: 0.003, max: 0.05, step: 0.001, label: "stroke width" },
+    strokeColor: { value: CLOUD_COLOR, label: "stroke colour" },
+    racers: { value: 9, min: 0, max: 9, step: 1 },
+    raceSpeed: { value: 2.4, min: 0, max: 12, step: 0.1, label: "race speed" },
+    speedVariance: { value: 0.2, min: 0, max: 0.6, step: 0.01, label: "speed variance" },
+    direction: { value: "anticlockwise", options: ["anticlockwise", "clockwise"] },
+    trail: { value: fromQuery("trail", 0, 1), min: 0, max: 1, step: 0.01 },
+    blur: { value: fromQuery("blur", 0, 1), min: 0, max: 1, step: 0.01 },
     dragSpin: { value: 0.35, min: 0.05, max: 1.5, step: 0.05, label: "drag spin" },
-    botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
-    faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
     Snapshot: button(() => captureRef.current?.()),
     snapshotTab: { value: false, label: "snapshot in tab" },
   });
-  const mode = settings.mode as Mode;
 
-  // A mode switch respawns the troop under the new rules.
-  const firstMode = useRef(true);
-  useEffect(() => {
-    if (firstMode.current) {
-      firstMode.current = false;
-      return;
-    }
-    setGeneration((g) => g + 1);
-  }, [mode]);
-
-  const fly = mode === "Fly";
-  const physics: Physics = {
-    mode,
-    gravity: fly ? 0 : settings.dropGravity,
-    restitution: fly ? settings.flyBounce : settings.dropBounce,
-    friction: fly ? 0 : settings.friction,
-    linearDamping: fly ? 0 : 0.15,
-    angularDamping: fly ? 0 : 1.4,
-    righting: fly ? 0 : settings.righting,
-    speed: settings.speed,
-    spin: settings.spin,
-    trail: fly ? settings.trail : 0,
-    blur: fly ? settings.blur : 0,
-    impulse: settings.impulse,
-    faceCamera: settings.faceCamera,
+  const look: Look = {
+    inside: settings.sphere as string,
+    outside: settings.outside as string,
+    cloud: settings.cloudColor as string,
+    stroke: settings.strokeColor as string,
+    trail: settings.trail,
+    blur: settings.blur,
     dragSpin: settings.dragSpin,
-    botScale: settings.botScale,
   };
+  const trackSettings = useMemo<TrackSettings>(
+    () => ({ offset: settings.trackOffset, width: settings.trackWidth, stroke: settings.strokeWidth }),
+    [settings.trackOffset, settings.trackWidth, settings.strokeWidth],
+  );
+  const racerSettings = useMemo<RacerSettings>(
+    () => ({
+      count: settings.racers,
+      speed: settings.raceSpeed,
+      variance: settings.speedVariance,
+      clockwise: settings.direction === "clockwise",
+      blur: settings.blur,
+    }),
+    [settings.racers, settings.raceSpeed, settings.speedVariance, settings.direction, settings.blur],
+  );
 
-  // Paint the page the outside colour so the canvas and page never mismatch
-  // (the canvas can lag a frame on resize, and overlays sit on the page), and
-  // flip the HUD text light or dark to stay readable.
-  const inside = settings.sphere as string;
-  const outside = settings.outside as string;
+  // Paint the page the outside colour so the canvas and page never mismatch,
+  // and flip the HUD text light or dark to stay readable.
   useEffect(() => {
     const root = document.documentElement.style;
-    root.setProperty("--stage-bg", outside);
-    const dark = luminance(outside) < 0.4;
+    root.setProperty("--stage-bg", look.outside);
+    const dark = luminance(look.outside) < 0.4;
     root.setProperty("--hud-fg", dark ? "#f4f1ec" : "#2a2724");
     root.setProperty("--hud-muted", dark ? "#b8b2aa" : "#6c665f");
-  }, [outside]);
+  }, [look.outside]);
 
   return (
     <>
@@ -899,12 +866,11 @@ export function Scene() {
         gl={renderer === "canvas2d" ? ({ canvas }) => new Canvas2DRenderer(canvas as HTMLCanvasElement) : undefined}
       >
         <Framed
-          physics={physics}
-          inside={inside}
-          outside={outside}
+          look={look}
+          trackSettings={trackSettings}
+          racerSettings={racerSettings}
           generation={generation}
           renderer={renderer}
-          ready={rapier.ready}
           drawRef={drawRef}
           captureRef={captureRef}
           snapshotInTab={settings.snapshotTab}
@@ -921,10 +887,6 @@ export function Scene() {
             detail: globalError,
           }}
         />
-      ) : rapier.error ? (
-        <StatusOverlay status={{ kind: "error", title: "Physics engine (Rapier WASM) failed to load", detail: rapier.error }} />
-      ) : !rapier.ready ? (
-        <StatusOverlay status={{ kind: "loading", message: "Loading physics engine…" }} />
       ) : null}
     </>
   );
