@@ -13,6 +13,57 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `fly` — zero-gravity bounce
+
+Branched from `canvas2d` (so it keeps the WebGL / Canvas 2D auto-detect and
+runs in Cursor's built-in browser). Instead of dropping into a pile, the ten
+bots drift through the viewport at one constant speed, spinning gently, and
+bounce off the frame edges like a screensaver.
+
+![Bots flying in zero gravity, WebGL renderer](docs/screenshot-fly.png)
+
+- **Physics:** gravity defaults to `0`; every bot spawns spread over the
+  visible area (jittered grid, so none start overlapping) with a random
+  heading at the shared `speed` and a small random spin. Rigid bodies use
+  restitution `1`, friction `0`, no linear or angular damping, never sleep,
+  and have CCD on so a fast bot cannot tunnel through a wall.
+- **Walls:** six invisible colliders sized from the camera frustum — left,
+  right, top, bottom, plus a shallow front/back pair — so the troop stays in
+  one depth band and always in frame. They resize with the window.
+- **Speed normaliser:** after every physics step each free-flying bot's
+  velocity is rescaled to exactly `speed` (the solver's elastic bounces and
+  bot-bot collisions are never quite lossless), and its spin is capped at
+  `spin`. A bot that has stopped (released from a drag without a flick) is
+  sent off in a fresh random direction. The normaliser only runs while
+  `gravity` is `0`; raise gravity and the bots fall and bounce elastically.
+- **Interaction:** tapping a bot shoves it in a random direction (the
+  normaliser turns that into a change of heading) with some spin; tapping
+  empty space gives every bot a new random heading and spin; drag-to-rotate
+  and flick work as before, and a flick also sets the release heading.
+- **Leva panel:** `speed` (default 6 units/s), `spin` (default 1.5 rad/s,
+  also the cap), `gravity` (default 0), `bounce` (default 1), `impulse
+  strength`, `drag spin`, `bot scale`, `face camera`, `Respawn`. `friction`
+  and `face seeking` are gone: friction no longer matters, and the
+  face-seeking torque would oscillate forever with no damping.
+- **Run alongside the other branches:** the worktree lives at
+  `~/repos/grok-bot-physics-fly` and is served on port `4733`
+  (`master` on 4731, `canvas2d` on 4732):
+
+  ```bash
+  cd ~/repos/grok-bot-physics-fly
+  npm install
+  npm run dev -- --port 4733 --strictPort
+  # → http://127.0.0.1:4733/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-fly bash -lc 'cd ~/repos/grok-bot-physics-fly && npm run dev -- --port 4733 --strictPort 2>&1 | tee /tmp/grok-bot-physics-fly.log'`.
+- **Test hooks** (for headless checks): `window.__grokBotPositions()`,
+  `window.__grokBotVelocities()` (with `speed`), `window.__grokBotBounds()`.
+  Verified headless with WebGL disabled (`--disable-gpu --disable-webgl
+  --disable-3d-apis`, Canvas 2D renderer) and with SwiftShader WebGL: all ten
+  bots stayed inside the walls for 60 s, speeds held within 0.01% of the
+  target, no console errors.
+
 ## This branch: `canvas2d` — runs without WebGL
 
 Cursor's built-in browser tab blocks WebGL (`getContext("webgl")` returns
@@ -57,33 +108,35 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
 
 ## Controls
 
-- **Tap / click a bot** — kicks it upward with a little spin.
+- **Tap / click a bot** — shoves it in a random direction with a little spin
+  (on this branch the speed normaliser keeps it at `speed`, so the tap
+  changes its heading).
 - **Drag a bot** — turns it in place like a tile in the tool (yaw with
   horizontal drag, pitch with vertical, 0.35°/px by default); release with a
-  flick to spin it. It is held in the air while dragged.
-- **Tap / click empty space** — radial scatter burst from that point.
+  flick to spin it and send it off that way. It is held still while dragged.
+- **Tap / click empty space** — every bot picks a new random heading and spin.
 - **Leva panel (top right)**
   - `background` — first row: RGB colour picker for the stage (click the
     swatch for the picker, or type a hex). Default white, like the tool.
     Applies live to both the canvas clear colour and the page behind it; the
     HUD text flips light on dark backgrounds.
-  - `gravity` — downward acceleration.
-  - `bounce` — collider restitution.
-  - `friction` — collider friction.
-  - `impulse strength` — size of the tap kick and scatter burst.
+  - `speed` — flight speed every bot is held at, world units per second.
+  - `spin` — angular speed at spawn and the cap collisions may not exceed.
+  - `gravity` — downward acceleration, default 0. Above 0 the normaliser
+    switches off and the bots fall and bounce.
+  - `bounce` — collider restitution (1 = fully elastic).
+  - `impulse strength` — size of the tap shove.
   - `drag spin` — degrees of rotation per pixel of drag.
-  - `face seeking` — a soft weeble torque that swings tumbling bots back to face
-    the camera upright, so eyes stay readable once they settle. 0 disables it.
   - `bot scale` — 0.5×–2× size multiplier for every bot, applied live to the
     meshes and their colliders (the play space deepens to fit, and tap
-    impulses scale with mass so kicks feel the same). Respawn re-drops at the
-    current scale with spacing adjusted so big bots land inside the walls.
+    impulses scale with mass so shoves feel the same). Respawn re-spreads at
+    the current scale with spacing adjusted so big bots start inside the walls.
   - `face camera` — off by default (full 3D tumbling). On: bots keep their
     face toward the viewer (no depth travel, spin only about the view axis).
-  - `Respawn` — re-drops all ten bots with reshuffled colors.
+  - `Respawn` — re-spreads all ten bots with new headings and reshuffled colors.
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
-Add `?lineup` to the URL to drop the bots in one evenly spaced, upright row
+Add `?lineup` to the URL to start the bots in one evenly spaced, upright row
 (handy for screenshots).
 
 ## Troubleshooting
@@ -146,6 +199,6 @@ Copied read-only from the Sand-Toolkit repo:
 - `src/canvas2d.ts` (this branch) is the Canvas 2D fallback renderer described
   above; `Scene.tsx` picks it when `detectWebGL()` fails or `?renderer=canvas2d`
   is set, and hands the bots the lighter geometry set.
-- `src/Scene.tsx` sets up an orthographic camera looking down -Z, an invisible
-  floor and walls at the viewport edges, a shallow front/back slab, the
-  face-seeking torque, click handling and the Leva panel.
+- `src/Scene.tsx` sets up an orthographic camera looking down -Z, the six
+  invisible walls at the viewport edges and a shallow front/back slab, the
+  per-step speed normaliser, click handling and the Leva panel.
