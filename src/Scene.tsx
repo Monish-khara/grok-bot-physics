@@ -229,7 +229,12 @@ function WebGLStage({
 
     // Screen: outside colour everywhere, the target inside the Sphere.
     const geometry = fx.frameMesh.geometry;
-    const pos = geometry.attributes.position as THREE.BufferAttribute;
+    const pos = geometry.attributes.position as THREE.BufferAttribute | undefined;
+    if (!pos) {
+      // First frame can run before the Sphere mesh effect has built the geometry.
+      gl.setRenderTarget(null);
+      return;
+    }
     let uv = geometry.attributes.uv as THREE.BufferAttribute | undefined;
     if (!uv || uv.count !== pos.count) {
       uv = new THREE.BufferAttribute(new Float32Array(pos.count * 2), 2);
@@ -804,8 +809,8 @@ export function Scene() {
     cloudColor: { value: CLOUD_COLOR, label: "cloud colour" },
     sphere: { value: SPHERE_COLOR, label: "sphere" },
     outside: { value: OUTSIDE_COLOR, label: "outside" },
-    trackOffset: { value: 0.16, min: 0.03, max: 0.5, step: 0.005, label: "track offset" },
-    trackWidth: { value: 0.17, min: 0.05, max: 0.4, step: 0.005, label: "track width" },
+    trackOffset: { value: 0.14, min: 0.03, max: 0.5, step: 0.005, label: "track offset" },
+    trackWidth: { value: 0.16, min: 0.05, max: 0.4, step: 0.005, label: "track width" },
     strokeWidth: { value: 0.012, min: 0.003, max: 0.05, step: 0.001, label: "stroke width" },
     strokeColor: { value: CLOUD_COLOR, label: "stroke colour" },
     racers: { value: 9, min: 0, max: 9, step: 1 },
