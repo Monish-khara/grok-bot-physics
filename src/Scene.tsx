@@ -21,10 +21,13 @@ const OUTSIDE_COLOR = "#4a4a4a";
 const CLOUD_COLOR = "#2ecc5c";
 /** The cloud's width as a fraction of the Sphere's width. */
 const CLOUD_FRACTION = 0.4;
-/** A racer's size as a fraction of the cloud's width. */
+/** A racer's default size as a fraction of the cloud's width (`racer size`). */
 const RACER_FRACTION = 0.12;
 /** Depth of the track ribbons (WebGL): behind the racers, which sit at z = 0. */
 const TRACK_Z = -1.5;
+/** Render order: sphere fill (the target's clear) < strokes < cloud and racers. */
+const STROKE_ORDER = -10;
+const FIGURE_ORDER = 0;
 /** Body-unit grid for the iso-line extraction: cells per axis over ±extent. */
 const ISO_RES = 224;
 const ISO_POINTS = 320;
@@ -376,6 +379,8 @@ type Track = {
   /** Offset curves in world units. */
   inner: Loop;
   outer: Loop;
+  /** The two rails as arc-length curves: racers ride centred on these. */
+  rails: [ClosedCurve, ClosedCurve];
   centreline: ClosedCurve;
   /** Distances from the silhouette, world units. */
   d1: number;
@@ -388,7 +393,9 @@ type Track = {
 /**
  * Fit the cloud to the Sphere and derive the track from its silhouette SDF.
  * Everything is computed in cloud body units (so the iso-line grid is
- * sampled once, at build time) and mapped to world units at the end.
+ * sampled once, at build time) and mapped to world units at the end. The
+ * SDF is the cloud's rest pose: breathing, wobble and drag never reach it,
+ * so the track holds still while the cloud moves inside it.
  */
 function useTrack(cloud: BotGeometry, sphere: Sphere, settings: TrackSettings): Track {
   const silhouette = useMemo(() => botSilhouette("cloud"), []);
@@ -428,6 +435,7 @@ function useTrack(cloud: BotGeometry, sphere: Sphere, settings: TrackSettings): 
       centre,
       inner,
       outer,
+      rails: [new ClosedCurve(inner), new ClosedCurve(outer)],
       centreline,
       d1: d1b * worldPerBody,
       d2: d2b * worldPerBody,
@@ -437,9 +445,14 @@ function useTrack(cloud: BotGeometry, sphere: Sphere, settings: TrackSettings): 
   }, [cloud, sphere, settings.offset, settings.width, settings.stroke, field, silhouette, bodyWidth]);
 }
 
-/** WebGL: the two strokes as flat ribbons behind the racers. */
+/**
+ * WebGL: the two strokes as flat ribbons behind the racers. They draw first
+ * (`renderOrder`) and never write depth, so a racer or the cloud always
+ * paints over them whatever its depth extent; the Sphere fill is the render
+ * target's clear colour, so it is under everything by construction.
+ */
 function TrackRibbons({ track, color }: { track: Track; color: string }) {
-  const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
+  const material = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false, depthWrite: false }), [color]);
   useEffect(() => () => material.dispose(), [material]);
   const geometries = useMemo(
     () => [ribbonGeometry(track.inner, track.strokeWidth, TRACK_Z), ribbonGeometry(track.outer, track.strokeWidth, TRACK_Z)],
@@ -449,7 +462,7 @@ function TrackRibbons({ track, color }: { track: Track; color: string }) {
   return (
     <>
       {geometries.map((g, i) => (
-        <mesh key={i} geometry={g} material={material} userData={{ ghost: true }} />
+        <mesh key={i} geometry={g} material={material} userData={{ ghost: true }} renderOrder={STROKE_ORDER} />
       ))}
     </>
   );
@@ -469,33 +482,121 @@ const ZERO = new THREE.Vector3();
 
 type Drag = { id: number; x0: number; y0: number; moved: boolean; q0: THREE.Quaternion };
 
+/** One breath (in and out), seconds. */
+const BREATH_SECONDS = 3.6;
+/** Squash-and-stretch amplitude at `breathe = 1`, as a fraction of the cloud's scale. */
+const BREATH_SQUASH = 0.06;
+/** Bob amplitude at `breathe = 1`, as a fraction of the cloud's width. */
+const BREATH_BOB = 0.012;
+/** Blink timing: closing plus opening, and the gap between blinks (min + random extra). */
+const BLINK_SECONDS = 0.16;
+const BLINK_GAP_MIN = 2.2;
+const BLINK_GAP_RANDOM = 3.0;
+/** Eye height while shut, as a fraction of open. */
+const BLINK_SHUT = 0.08;
+
+type Eye = { mesh: THREE.Mesh; centreY: number };
+
 /**
- * The cloud: fixed at the centre, face to the camera. Drag turns it like a
- * tile in the tool (yaw with horizontal drag, pitch with vertical); a tap
- * gives it a damped squash-and-stretch wobble. The track never moves.
+ * The cloud: fixed at the centre, face to the camera, breathing — a looping
+ * squash-and-stretch (x and y in anti-phase, area roughly conserved) with a
+ * gentle bob, and periodic blinks. Drag turns it like a tile in the tool
+ * (yaw with horizontal drag, pitch with vertical); a tap gives it a damped
+ * squash-and-stretch wobble. Both layer on top of the breathing: the wobble
+ * multiplies the breath's scale and the drag pose composes with the wobble's
+ * roll, so neither fights it. The track is built from the rest pose and
+ * never moves.
  */
-function Cloud({ track, color, dragSpin, blur }: { track: Track; color: string; dragSpin: number; blur: number }) {
+function Cloud({
+  track,
+  color,
+  dragSpin,
+  blur,
+  breathe,
+  blink,
+}: {
+  track: Track;
+  color: string;
+  dragSpin: number;
+  blur: number;
+  /** Breathing amount, 0 (still) to 1. */
+  breathe: number;
+  blink: boolean;
+}) {
   const group = useRef<THREE.Group | null>(null);
   const drag = useRef<Drag | null>(null);
   /** Rest pose (set by dragging) and the time since the last tap. */
   const pose = useRef(new THREE.Quaternion());
   const wobble = useRef(Infinity);
+  /** Breathing clock (seconds), and the seconds until the next blink starts. */
+  const clock = useRef(0);
+  const nextBlink = useRef(BLINK_GAP_MIN);
+  /** Seconds into the current blink, or Infinity between blinks. */
+  const blinkT = useRef(Infinity);
+  const eyes = useRef<Eye[] | null>(null);
 
-  useFrame((_, dt) => {
+  useFrame((_, rawDt) => {
     const g = group.current;
     if (!g) return;
-    g.position.set(track.centre.x, track.centre.y, 0);
+    const dt = Math.min(rawDt, 0.1);
+    clock.current += dt;
+    const phase = (clock.current / BREATH_SECONDS) * Math.PI * 2;
+    // A sine with a little second harmonic, so the inhale peaks sharper than the exhale.
+    const breath = 0.85 * Math.sin(phase) + 0.15 * Math.sin(2 * phase);
+    const squash = BREATH_SQUASH * breathe * breath;
+    let sx = 1 + squash, sy = 1 - squash;
+    const bob = BREATH_BOB * breathe * track.cloudWidth * Math.sin(phase - Math.PI / 4);
+    g.position.set(track.centre.x, track.centre.y + bob, 0);
+
     wobble.current += dt;
     const t = wobble.current;
     if (t < 1.6) {
       const env = Math.exp(-3.2 * t);
       const sq = 0.14 * Math.sin(t * 22) * env;
-      g.scale.set(track.cloudScale * (1 + sq), track.cloudScale * (1 - sq), track.cloudScale);
+      sx *= 1 + sq;
+      sy *= 1 - sq;
       qWobble.setFromAxisAngle(Z_AXIS, 0.06 * Math.sin(t * 17) * env);
       g.quaternion.copy(qWobble).multiply(pose.current);
     } else {
-      g.scale.setScalar(track.cloudScale);
       g.quaternion.copy(pose.current);
+    }
+    g.scale.set(track.cloudScale * sx, track.cloudScale * sy, track.cloudScale);
+
+    // Blink: the eye meshes live in the body's frame, so scale each about
+    // its own centre (shift by centre × (1 − s)) rather than the body origin.
+    if (!eyes.current) {
+      const found: Eye[] = [];
+      g.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh || !m.userData.eyeNormal) return;
+        if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+        found.push({ mesh: m, centreY: m.geometry.boundingBox!.getCenter(new THREE.Vector3()).y });
+      });
+      eyes.current = found;
+    }
+    let lid = 1;
+    if (blink) {
+      if (blinkT.current === Infinity) {
+        nextBlink.current -= dt;
+        if (nextBlink.current <= 0) blinkT.current = 0;
+      } else {
+        blinkT.current += dt;
+        if (blinkT.current >= BLINK_SECONDS) {
+          blinkT.current = Infinity;
+          nextBlink.current = BLINK_GAP_MIN + Math.random() * BLINK_GAP_RANDOM;
+        } else {
+          // Shut fast, open a touch slower: a raised sine over the blink.
+          const u = blinkT.current / BLINK_SECONDS;
+          const shut = Math.sin(Math.PI * u) ** 0.7;
+          lid = 1 - (1 - BLINK_SHUT) * shut;
+        }
+      }
+    } else if (blinkT.current !== Infinity) {
+      blinkT.current = Infinity;
+    }
+    for (const eye of eyes.current) {
+      eye.mesh.scale.y = lid;
+      eye.mesh.position.y = eye.centreY * (1 - lid);
     }
   });
 
@@ -531,6 +632,7 @@ function Cloud({ track, color, dragSpin, blur }: { track: Track; color: string; 
       scale={1}
       blur={blur}
       velocity={ZERO}
+      renderOrder={FIGURE_ORDER}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -542,6 +644,8 @@ function Cloud({ track, color, dragSpin, blur }: { track: Track; color: string; 
 
 type RacerSettings = {
   count: number;
+  /** Racer size as a fraction of the cloud's width. */
+  size: number;
   speed: number;
   variance: number;
   clockwise: boolean;
@@ -553,7 +657,9 @@ const BOOST_SECONDS = 1.6;
 const BOOST_GAIN = 1.4;
 
 type RacerState = {
-  /** Arc length along the centreline. */
+  /** Which rail this racer rides: 0 inner, 1 outer. */
+  rail: 0 | 1;
+  /** Arc length along that rail. */
   s: number;
   /** Per-racer speed multiplier, 1 ± variance. */
   factor: number;
@@ -566,10 +672,12 @@ type RacerState = {
 };
 
 /**
- * The nine other bots as kinematic racers riding the lane centreline:
- * position = centreline(s), heading from the tangent (they lean into the
- * travel and turn a little toward it), a light bob, even starting gaps.
- * Speeds differ per racer so they overtake; a tap gives a short boost.
+ * The nine other bots as kinematic racers riding the two rails, centred on
+ * the strokes: even-numbered racers on the inner rail, odd on the outer, so
+ * the field splits in half. Position = rail(s), heading from the tangent
+ * (they lean into the travel and turn a little toward it), a light bob,
+ * even starting gaps on each rail with the outer rail staggered by half a
+ * gap. Speeds differ per racer so they overtake; a tap gives a short boost.
  */
 function Racers({
   bots,
@@ -592,17 +700,23 @@ function Racers({
   const n = Math.min(settings.count, bots.length);
   const live = useMemo(() => bots.slice(0, n), [bots, n]);
 
-  // (Re)space the field evenly and re-roll the speed factors.
-  const states = useMemo(() => {
-    const L = track.centreline.length;
-    return live.map((_, i) => ({
-      s: (L * i) / Math.max(1, n),
-      factor: 1 + (Math.random() * 2 - 1) * settings.variance,
-      boost: 0,
-      phase: Math.random() * Math.PI * 2,
-      velocity: new THREE.Vector3(),
-      prev: new THREE.Vector3(NaN, NaN, NaN),
-    }));
+  // (Re)space the field evenly along each rail and re-roll the speed factors.
+  const states = useMemo<RacerState[]>(() => {
+    const perRail = [Math.ceil(n / 2), Math.floor(n / 2)];
+    return live.map((_, i) => {
+      const rail = (i % 2) as 0 | 1;
+      const L = track.rails[rail].length;
+      const k = Math.floor(i / 2);
+      return {
+        rail,
+        s: (L * (k + rail * 0.5)) / Math.max(1, perRail[rail]),
+        factor: 1 + (Math.random() * 2 - 1) * settings.variance,
+        boost: 0,
+        phase: Math.random() * Math.PI * 2,
+        velocity: new THREE.Vector3(),
+        prev: new THREE.Vector3(NaN, NaN, NaN),
+      };
+    });
     // Re-roll on respawn, count or variance change only; a slider nudge to
     // speed or the track must not reshuffle the field.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -618,7 +732,7 @@ function Racers({
     // Cap the step so a stalled tab does not teleport the field; slow software GL runs slow-motion instead.
     const dt = Math.min(rawDt, 0.1);
     const dir = settings.clockwise ? -1 : 1;
-    const size = RACER_FRACTION * track.cloudWidth;
+    const size = settings.size * track.cloudWidth;
     for (let i = 0; i < states.length; i++) {
       const st = states[i];
       const g = groups.current[i];
@@ -626,10 +740,11 @@ function Racers({
       if (st.boost > 0) st.boost = Math.max(0, st.boost - dt);
       const boost = 1 + BOOST_GAIN * (st.boost / BOOST_SECONDS);
       st.s += dir * settings.speed * st.factor * boost * dt;
-      track.centreline.pointAt(st.s, p);
-      track.centreline.tangentAt(st.s, tan);
-      // Bob: a little hop per unit travelled, scaled to the racer.
-      const bob = 0.06 * size * Math.abs(Math.sin(st.s * (2.2 / size) + st.phase));
+      const rail = track.rails[st.rail];
+      rail.pointAt(st.s, p);
+      rail.tangentAt(st.s, tan);
+      // Bob: a slight hop per unit travelled, scaled to the racer, so it still reads as sitting on the rail.
+      const bob = 0.04 * size * Math.abs(Math.sin(st.s * (2.2 / size) + st.phase));
       g.position.set(p.x, p.y + bob, 0);
       // Lean into the travel direction (tilt the top the way it is going) and
       // yaw slightly toward it, keeping the face mostly to the camera.
@@ -667,6 +782,7 @@ function Racers({
           scale={scale / Math.max(bot.halfExtents.x, bot.halfExtents.y)}
           blur={settings.blur}
           velocity={states[i].velocity}
+          renderOrder={FIGURE_ORDER}
           onPointerDown={onDown(i)}
           onPointerUp={onUp(i)}
         />
@@ -695,6 +811,8 @@ type Look = {
   trail: number;
   blur: number;
   dragSpin: number;
+  breathe: number;
+  blink: boolean;
 };
 
 /** Inner component so the Sphere fit (which needs the canvas size) can be shared. */
@@ -733,7 +851,7 @@ function Framed({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [racers, generation]);
   const racerStates = useRef<RacerState[]>([]);
-  const racerScale = (RACER_FRACTION * track.cloudWidth) / 2;
+  const racerScale = (racerSettings.size * track.cloudWidth) / 2;
 
   const strokes = useMemo<StageStroke[]>(
     () => [
@@ -750,13 +868,14 @@ function Framed({
       __grokBotPositions?: () => { id: string; x: number; y: number; z: number }[];
       __grokBotBounds?: () => Sphere;
       __grokTrack?: () => unknown;
-      __grokRacers?: () => { id: string; s: number; factor: number; boost: number }[];
+      __grokRacers?: () => { id: string; rail: number; s: number; factor: number; boost: number }[];
     };
     w.__grokBotsReady = true;
     w.__grokBotBounds = () => sphere;
     w.__grokBotPositions = () =>
       racerStates.current.map((st, i) => ({ id: racers[i].shape.id, x: st.prev.x, y: st.prev.y, z: st.prev.z }));
-    w.__grokRacers = () => racerStates.current.map((st, i) => ({ id: racers[i].shape.id, s: st.s, factor: st.factor, boost: st.boost }));
+    w.__grokRacers = () =>
+      racerStates.current.map((st, i) => ({ id: racers[i].shape.id, rail: st.rail, s: st.s, factor: st.factor, boost: st.boost }));
     w.__grokTrack = () => ({
       centre: { x: track.centre.x, y: track.centre.y },
       cloudWidth: track.cloudWidth,
@@ -764,13 +883,13 @@ function Framed({
       d1: track.d1,
       d2: track.d2,
       strokeWidth: track.strokeWidth,
-      racerSize: RACER_FRACTION * track.cloudWidth,
+      racerSize: racerSettings.size * track.cloudWidth,
       inner: Array.from(track.inner),
       outer: Array.from(track.outer),
       centreline: Array.from(track.centreline.pts),
       outline: track.outline ? Array.from(track.outline) : null,
     });
-  }, [sphere, track, racers]);
+  }, [sphere, track, racers, racerSettings.size]);
 
   return (
     <>
@@ -784,7 +903,14 @@ function Framed({
       ) : (
         <Canvas2DStage sphere={sphere} inside={look.inside} outside={look.outside} strokes={strokes} trail={look.trail} blur={look.blur} />
       )}
-      <Cloud track={track} color={look.cloud} dragSpin={look.dragSpin} blur={renderer === "webgl" ? look.blur : 0} />
+      <Cloud
+        track={track}
+        color={look.cloud}
+        dragSpin={look.dragSpin}
+        blur={renderer === "webgl" ? look.blur : 0}
+        breathe={look.breathe}
+        blink={look.blink}
+      />
       <Racers
         bots={racers}
         track={track}
@@ -810,11 +936,14 @@ export function Scene() {
     cloudColor: { value: CLOUD_COLOR, label: "cloud colour" },
     sphere: { value: SPHERE_COLOR, label: "sphere" },
     outside: { value: OUTSIDE_COLOR, label: "outside" },
-    trackOffset: { value: 0.14, min: 0.03, max: 0.5, step: 0.005, label: "track offset" },
-    trackWidth: { value: 0.16, min: 0.05, max: 0.4, step: 0.005, label: "track width" },
+    breathe: { value: fromQuery("breathe", 0.5, 1), min: 0, max: 1, step: 0.01 },
+    blink: { value: QUERY.get("blink") !== "0" },
+    trackOffset: { value: 0.16, min: 0.03, max: 0.5, step: 0.005, label: "track offset" },
+    trackWidth: { value: 0.035, min: 0.01, max: 0.4, step: 0.005, label: "track width" },
     strokeWidth: { value: 0.012, min: 0.003, max: 0.05, step: 0.001, label: "stroke width" },
     strokeColor: { value: CLOUD_COLOR, label: "stroke colour" },
     racers: { value: 9, min: 0, max: 9, step: 1 },
+    racerSize: { value: RACER_FRACTION, min: 0.04, max: 0.3, step: 0.005, label: "racer size" },
     raceSpeed: { value: 2.4, min: 0, max: 12, step: 0.1, label: "race speed" },
     speedVariance: { value: 0.2, min: 0, max: 0.6, step: 0.01, label: "speed variance" },
     direction: { value: "anticlockwise", options: ["anticlockwise", "clockwise"] },
@@ -834,6 +963,8 @@ export function Scene() {
     trail: settings.trail,
     blur: settings.blur,
     dragSpin: settings.dragSpin,
+    breathe: settings.breathe,
+    blink: settings.blink,
   };
   const trackSettings = useMemo<TrackSettings>(
     () => ({ offset: settings.trackOffset, width: settings.trackWidth, stroke: settings.strokeWidth }),
@@ -842,12 +973,13 @@ export function Scene() {
   const racerSettings = useMemo<RacerSettings>(
     () => ({
       count: settings.racers,
+      size: settings.racerSize,
       speed: settings.raceSpeed,
       variance: settings.speedVariance,
       clockwise: settings.direction === "clockwise",
       blur: settings.blur,
     }),
-    [settings.racers, settings.raceSpeed, settings.speedVariance, settings.direction, settings.blur],
+    [settings.racers, settings.racerSize, settings.raceSpeed, settings.speedVariance, settings.direction, settings.blur],
   );
 
   // Paint the page the outside colour so the canvas and page never mismatch,

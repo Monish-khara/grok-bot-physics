@@ -19,6 +19,8 @@ type Props = {
   blur: number;
   /** World velocity the scene measured for this figure this frame. */
   velocity: THREE.Vector3;
+  /** WebGL draw order for the body and eyes (higher draws later); ghosts draw one step earlier. */
+  renderOrder?: number;
   onPointerDown?: (e: ThreeEvent<PointerEvent>) => void;
   onPointerMove?: (e: ThreeEvent<PointerEvent>) => void;
   onPointerUp?: (e: ThreeEvent<PointerEvent>) => void;
@@ -31,7 +33,7 @@ const BLUR_ALPHA = 0.5;
 const EYE_COLOR = "#ffffff";
 
 export const Figure = forwardRef<THREE.Group, Props>(function Figure(
-  { bot, color, scale, blur, velocity, onPointerDown, onPointerMove, onPointerUp },
+  { bot, color, scale, blur, velocity, renderOrder = 0, onPointerDown, onPointerMove, onPointerUp },
   ref,
 ) {
   const meshRef = useRef<THREE.Mesh | null>(null);
@@ -103,20 +105,21 @@ export const Figure = forwardRef<THREE.Group, Props>(function Figure(
           geometry={bot.geometry}
           material={material}
           scale={scale}
+          renderOrder={renderOrder}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
           {bot.eyes.map((g, i) => (
-            <mesh key={i} geometry={g} material={eyeMaterial} userData={{ eyeNormal: bot.eyeNormals[i] }} />
+            <mesh key={i} geometry={g} material={eyeMaterial} renderOrder={renderOrder} userData={{ eyeNormal: bot.eyeNormals[i] }} />
           ))}
         </mesh>
       </group>
       {ghostCount > 0 && (
         <group ref={ghostsRef} visible={false}>
           {ghostMaterials.map((m, i) => (
-            <mesh key={i} geometry={bot.geometry} material={m.body} userData={{ ghost: true }} renderOrder={-1}>
+            <mesh key={i} geometry={bot.geometry} material={m.body} userData={{ ghost: true }} renderOrder={renderOrder - 1}>
               {bot.eyes.map((g, j) => (
                 <mesh key={j} geometry={g} material={m.eye} />
               ))}
