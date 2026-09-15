@@ -16,6 +16,7 @@
  */
 
 import type { ShapeId } from "./shapes";
+import { CHORD } from "../sphereShape";
 
 export type Pt2 = readonly [number, number];
 
@@ -1320,4 +1321,28 @@ export const BODIES: Record<ShapeId, BotBody> = {
     },
     eyes: { size: 1.258, width: 0.213, height: 0.467, gap: 0.468, shiftX: 0, shiftY: 0.18 },
   },
+  dome: {
+    // Analytic, not dumped: the unit sphere with its base sliced flat at
+    // y = CHORD, the same cut as the Sphere container, so a dome scaled to
+    // the container's radius fills it exactly. Profile (radius, y) from the
+    // flat rim up to just short of the apex; the refit closes the tip with
+    // the tangent sphere cap, which for a circle is the circle itself.
+    body: { kind: "revolve", profile: domeProfile() },
+    // Eyes sit high on the dome (reference: pills about 0.6 R up, 0.6 R
+    // apart). The pill lies in the tangent plane there, which leans back
+    // ~37°, so the height is stretched to read as the reference's from the
+    // front.
+    eyes: { size: 1, width: 0.25, height: 0.56, gap: 0.6, shiftX: 0, shiftY: 0.5 },
+  },
 };
+
+function domeProfile(): Pt2[] {
+  const top = 0.96;
+  const steps = 72;
+  const out: Pt2[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const y = CHORD + ((top - CHORD) * i) / steps;
+    out.push([Math.sqrt(Math.max(0, 1 - y * y)), y]);
+  }
+  return out;
+}

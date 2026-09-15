@@ -22,7 +22,8 @@ export type ShapeId =
   | "star6"
   | "teardrop"
   | "tablet"
-  | "wedge";
+  | "wedge"
+  | "dome";
 
 export type BotShape = { id: ShapeId; label: string; path: string };
 
@@ -86,5 +87,13 @@ export const SHAPES: readonly BotShape[] = [
     label: "Wedge",
     path:
       "M77.26 42.06Q114.27 -22.05 151.28 42.06L216.15 154.43Q253.17 218.53 179.14 218.53L49.4 218.53Q-24.62 218.53 12.39 154.43Z",
+  },
+  {
+    // Not from the toolkit: the Sphere's own silhouette as a bot (nesting
+    // branch) — a circle with its base sliced flat at y = -0.42 R, see
+    // src/sphereShape.ts. Circle of radius 114.5 in the box, chord at 162.6.
+    id: "dome",
+    label: "Dome",
+    path: "M10.61 162.59A114.5 114.5 0 1 1 218.39 162.59Z",
   },
 ];
