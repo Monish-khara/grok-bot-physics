@@ -18,6 +18,16 @@ import * as THREE from "three";
  *   inlays, that is when — and only when — they would be visible.
  * - Per-body ordering is an approximation: two interpenetrating bodies would
  *   overlap wrongly, but colliders keep them apart.
+ *
+ * Effects (`effects.trail`, `effects.blur`, both 0–1, 0 = off):
+ * - Trail: each body's silhouette path is snapshotted as it moves and the
+ *   snapshots are refilled in the body's colour, fading with age, before the
+ *   live bodies. The frame is still fully cleared to the background every
+ *   time, so unlike an alpha fade-clear there is no residue that never quite
+ *   reaches the background, and changing the background colour just works.
+ * - Blur: the body (with its eyes) is refilled a few times, stepped backwards
+ *   along its screen-space velocity (`mesh.userData.velocity`, world units/s,
+ *   written by the scene) with decreasing alpha, then drawn solid on top.
  */
 export class Canvas2DRenderer {
   readonly domElement: HTMLCanvasElement;
@@ -25,6 +35,12 @@ export class Canvas2DRenderer {
   /** Rolling average of `render()` time, ms — read by headless checks. */
   frameMs = 0;
   frames = 0;
+  /** Effect strengths, 0–1 each; 0 disables. Set by the scene from the Leva panel. */
+  effects = { trail: 0, blur: 0 };
+  /** Extra fills drawn last frame for trails and blur, for profiling. */
+  ghostFills = 0;
+
+  private trails = new Map<THREE.Mesh, TrailHistory>();
 
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
@@ -49,7 +65,7 @@ export class Canvas2DRenderer {
   }
 
   /** Per-phase timings of the last frame (ms), for profiling. */
-  phases = { project: 0, path: 0, fill: 0, triangles: 0 };
+  phases = { project: 0, path: 0, fill: 0, triangles: 0, trails: 0 };
   /**
    * "silhouette" traces only the outline loops (fast); "triangles" emits every
    * front-facing triangle (slow, but a straightforward ground truth used by
@@ -135,7 +151,7 @@ export class Canvas2DRenderer {
 
   private renderTo(ctx: CanvasRenderingContext2D, dpr: number, scene: THREE.Scene, camera: THREE.Camera) {
     const t0 = performance.now();
-    this.phases.project = this.phases.path = this.phases.fill = this.phases.triangles = 0;
+    this.phases.project = this.phases.path = this.phases.fill = this.phases.triangles = this.phases.trails = 0;
     if (scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();
     if (camera.parent === null && camera.matrixWorldAutoUpdate) camera.updateMatrixWorld();
 
@@ -154,12 +170,13 @@ export class Canvas2DRenderer {
     this.toCamera.set(0, 0, 1).transformDirection(camera.matrixWorld);
 
     // Top-level meshes are bodies (or the click-catcher plane); mesh children
-    // of a body are its eyes.
+    // of a body are its eyes. WebGL-only blur ghosts are tagged and skipped.
     this.bodies.length = 0;
     scene.traverseVisible((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
       if (mesh.parent && (mesh.parent as THREE.Mesh).isMesh) return;
+      if (mesh.userData.ghost) return;
       if (!isDrawable(mesh.material)) return;
       this.tmpV.setFromMatrixPosition(mesh.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
       this.bodies.push({ mesh, depth: this.tmpV.z });
@@ -167,9 +184,17 @@ export class Canvas2DRenderer {
     // View space looks down -Z: more negative is farther. Draw far first.
     this.bodies.sort((a, b) => a.depth - b.depth);
 
+    const live = ctx === this.ctx; // offscreen ground-truth renders must not touch trail state
+    const now = t0;
+    const { trail, blur } = this.effects;
+    this.ghostFills = 0;
+
+    // Build every body's paths first so trails can be laid down underneath all of them.
+    const frame: BodyFrame[] = [];
     for (const { mesh } of this.bodies) {
-      const bodyPath = this.fillMesh(ctx, mesh, colorOf(mesh.material));
+      const bodyPath = this.buildPath(mesh);
       if (!bodyPath) continue;
+      const eyes: { path: Path2D; color: string }[] = [];
       for (const child of mesh.children) {
         const eye = child as THREE.Mesh;
         if (!eye.isMesh || !eye.visible) continue;
@@ -181,14 +206,32 @@ export class Canvas2DRenderer {
           if (this.tmpN.dot(this.toCamera) < 0.15) continue;
         }
         if (!isDrawable(eye.material)) continue;
-        // The pill is mostly buried in the body; clipping to the body's
-        // silhouette stands in for the depth test at grazing angles.
+        const eyePath = this.buildPath(eye);
+        if (eyePath) eyes.push({ path: eyePath, color: colorOf(eye.material) });
+      }
+      frame.push({ mesh, path: bodyPath, color: colorOf(mesh.material), eyes });
+    }
+
+    if (live) this.drawTrails(ctx, frame, trail, now);
+
+    const tf = performance.now();
+    for (const body of frame) {
+      if (blur > 0) this.drawBlur(ctx, body, blur);
+      ctx.fillStyle = body.color;
+      ctx.fill(body.path, "nonzero");
+      // The pill is mostly buried in the body; clipping to the body's
+      // silhouette stands in for the depth test at grazing angles.
+      if (body.eyes.length) {
         ctx.save();
-        ctx.clip(bodyPath, "nonzero");
-        this.fillMesh(ctx, eye, colorOf(eye.material));
+        ctx.clip(body.path, "nonzero");
+        for (const eye of body.eyes) {
+          ctx.fillStyle = eye.color;
+          ctx.fill(eye.path, "nonzero");
+        }
         ctx.restore();
       }
     }
+    this.phases.fill += performance.now() - tf;
 
     const dt = performance.now() - t0;
     this.frames++;
@@ -205,7 +248,7 @@ export class Canvas2DRenderer {
    * shut with a straight chord — a visible wedge cut out of a body. The net
    * edge sum below is balanced by construction, so loops always close.
    */
-  private fillMesh(ctx: CanvasRenderingContext2D, mesh: THREE.Mesh, color: string): Path2D | null {
+  private buildPath(mesh: THREE.Mesh): Path2D | null {
     const geometry = mesh.geometry;
     const position = geometry.attributes.position as THREE.BufferAttribute | undefined;
     if (!position) return null;
@@ -274,7 +317,7 @@ export class Canvas2DRenderer {
     this.phases.triangles += edges;
     if (!edges) return null;
 
-    if (this.fillMode === "triangles") return this.fillTriangles(ctx, adj, out, color);
+    if (this.fillMode === "triangles") return this.trianglePath(adj, out);
 
     // Chain directed edges into closed loops. Every vertex has as many
     // outgoing as incoming silhouette edges, so any unused outgoing edge
@@ -304,13 +347,9 @@ export class Canvas2DRenderer {
       // Cannot happen with balanced edges; if it ever does, correctness over
       // speed: fill every front triangle for this mesh instead.
       this.unclosedLoops++;
-      return this.fillTriangles(ctx, adj, out, color);
+      return this.trianglePath(adj, out);
     }
-    const tr = performance.now();
-    this.phases.path += tr - tq;
-    ctx.fillStyle = color;
-    ctx.fill(path, "nonzero");
-    this.phases.fill += performance.now() - tr;
+    this.phases.path += performance.now() - tq;
     return path;
   }
 
@@ -318,7 +357,7 @@ export class Canvas2DRenderer {
   unclosedLoops = 0;
 
   /** Ground truth / fallback: every front-facing triangle, one nonzero fill. */
-  private fillTriangles(ctx: CanvasRenderingContext2D, adj: Adjacency, out: Float32Array, color: string): Path2D {
+  private trianglePath(adj: Adjacency, out: Float32Array): Path2D {
     const { tris, triCount, front } = adj;
     const path = new Path2D();
     for (let t = 0, i = 0; t < triCount; t++, i += 3) {
@@ -329,9 +368,116 @@ export class Canvas2DRenderer {
       path.lineTo(out[c], out[c + 1]);
       path.closePath();
     }
-    ctx.fillStyle = color;
-    ctx.fill(path, "nonzero");
     return path;
+  }
+
+  /**
+   * Trails: remember where each body was and refill those silhouettes, oldest
+   * and faintest first. Snapshots are spaced in time (at most TRAIL_SNAPSHOTS
+   * alive per body, so the cost is bounded) and skipped while a body is
+   * parked, so a dragged bot does not stack copies into a solid blot.
+   */
+  private drawTrails(ctx: CanvasRenderingContext2D, frame: BodyFrame[], trail: number, now: number) {
+    if (trail <= 0) {
+      if (this.trails.size) this.trails.clear();
+      return;
+    }
+    const life = TRAIL_SECONDS * trail;
+    const interval = Math.max(1000 / 60, (life * 1000) / TRAIL_SNAPSHOTS);
+    const seen = new Set<THREE.Mesh>();
+    for (const body of frame) {
+      seen.add(body.mesh);
+      let h = this.trails.get(body.mesh);
+      if (!h) {
+        h = { snapshots: [], lastAt: -Infinity, lastX: NaN, lastY: NaN };
+        this.trails.set(body.mesh, h);
+      }
+      this.tmpV.setFromMatrixPosition(body.mesh.matrixWorld);
+      this.project(this.tmpV);
+      const moved = Math.hypot(this.tmpV.x - h.lastX, this.tmpV.y - h.lastY);
+      if (now - h.lastAt >= interval && !(moved < 2)) {
+        h.snapshots.push({ path: body.path, color: body.color, at: now });
+        h.lastAt = now;
+        h.lastX = this.tmpV.x;
+        h.lastY = this.tmpV.y;
+        if (h.snapshots.length > TRAIL_SNAPSHOTS) h.snapshots.shift();
+      }
+    }
+    // Bodies that vanished (respawn) keep fading out, then drop off.
+    for (const [mesh, h] of this.trails) {
+      while (h.snapshots.length && now - h.snapshots[0].at > life * 1000) h.snapshots.shift();
+      if (!h.snapshots.length && !seen.has(mesh)) this.trails.delete(mesh);
+    }
+    const tg = performance.now();
+    // Oldest first across all bodies, so a fresh ghost never hides under a stale one.
+    let oldest = Infinity;
+    for (const h of this.trails.values()) if (h.snapshots.length) oldest = Math.min(oldest, h.snapshots[0].at);
+    if (oldest === Infinity) return;
+    // Snapshots are spaced by `interval`, so walking time slots in order is
+    // equivalent to a global sort but needs no allocation.
+    for (let t = oldest; t <= now; t += interval) {
+      for (const h of this.trails.values()) {
+        for (const snap of h.snapshots) {
+          if (snap.at < t || snap.at >= t + interval) continue;
+          const age = (now - snap.at) / (life * 1000);
+          if (age >= 1) continue;
+          ctx.globalAlpha = TRAIL_ALPHA * (1 - age) ** 1.5;
+          ctx.fillStyle = snap.color;
+          ctx.fill(snap.path, "nonzero");
+          this.ghostFills++;
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+    this.phases.trails = performance.now() - tg;
+  }
+
+  /**
+   * Speed blur: refill the body and its eyes stepped backwards along its
+   * screen-space velocity, faintest and farthest first. The offset is
+   * `speed × blur × BLUR_SECONDS` of travel, so faster bots smear more.
+   */
+  private drawBlur(ctx: CanvasRenderingContext2D, body: BodyFrame, blur: number) {
+    const vel = body.mesh.userData.velocity as THREE.Vector3 | undefined;
+    if (!vel) return;
+    const speed = vel.length();
+    if (speed < 1e-3) return;
+    // Screen-space velocity: project the position and position + velocity.
+    this.tmpV.setFromMatrixPosition(body.mesh.matrixWorld);
+    this.project(this.tmpV);
+    const px = this.tmpV.x, py = this.tmpV.y;
+    this.tmpV.setFromMatrixPosition(body.mesh.matrixWorld).add(vel);
+    this.project(this.tmpV);
+    const vx = this.tmpV.x - px, vy = this.tmpV.y - py;
+    const vlen = Math.hypot(vx, vy);
+    const length = vlen * blur * BLUR_SECONDS;
+    if (length < 1) return;
+    const copies = Math.min(BLUR_MAX_COPIES, Math.max(2, Math.ceil(length / BLUR_STEP_PX)));
+    const dx = -vx / vlen, dy = -vy / vlen;
+    for (let i = copies; i >= 1; i--) {
+      const f = i / copies;
+      ctx.save();
+      ctx.translate(dx * length * f, dy * length * f);
+      ctx.globalAlpha = BLUR_ALPHA * (1 - f) + 0.04;
+      ctx.fillStyle = body.color;
+      ctx.fill(body.path, "nonzero");
+      if (body.eyes.length) {
+        ctx.clip(body.path, "nonzero");
+        for (const eye of body.eyes) {
+          ctx.fillStyle = eye.color;
+          ctx.fill(eye.path, "nonzero");
+        }
+      }
+      ctx.restore();
+      this.ghostFills += 1 + body.eyes.length;
+    }
+  }
+
+  /** World position → canvas pixels (CSS px, before the dpr transform), in place. */
+  private project(v: THREE.Vector3) {
+    v.applyMatrix4(this.viewProj);
+    v.x = (v.x + 1) * 0.5 * this.width;
+    v.y = (1 - v.y) * 0.5 * this.height;
   }
 
   private adjacencyCache = new Map<THREE.BufferGeometry, Adjacency>();
@@ -385,6 +531,33 @@ export class Canvas2DRenderer {
     return adj;
   }
 }
+
+/** Trail persistence at `trail = 1`, seconds. */
+const TRAIL_SECONDS = 2;
+/** Most snapshots kept alive per body; bounds the extra fills per frame. */
+const TRAIL_SNAPSHOTS = 24;
+/** Opacity of the newest trail copy. */
+const TRAIL_ALPHA = 0.45;
+/** Smear length at `blur = 1`, as seconds of travel along the velocity. */
+const BLUR_SECONDS = 0.16;
+const BLUR_MAX_COPIES = 8;
+const BLUR_STEP_PX = 8;
+/** Opacity of the blur copy nearest the body. */
+const BLUR_ALPHA = 0.5;
+
+type BodyFrame = {
+  mesh: THREE.Mesh;
+  path: Path2D;
+  color: string;
+  eyes: { path: Path2D; color: string }[];
+};
+
+type TrailHistory = {
+  snapshots: { path: Path2D; color: string; at: number }[];
+  lastAt: number;
+  lastX: number;
+  lastY: number;
+};
 
 type Adjacency = {
   tris: Uint32Array;

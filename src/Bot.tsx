@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useMemo, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import {
   BallCollider,
@@ -8,7 +8,7 @@ import {
   useRapier,
   type RapierRigidBody,
 } from "@react-three/rapier";
-import type { ThreeEvent } from "@react-three/fiber";
+import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import type { BotGeometry } from "./geometry";
 
 type Props = {
@@ -23,8 +23,20 @@ type Props = {
   dragSpin: number;
   /** Uniform size multiplier applied to the mesh and its collider. */
   scale: number;
+  /**
+   * Speed-blur strength, 0–1, for the WebGL renderer: translucent copies of
+   * the body trail behind it along its velocity. The Canvas 2D renderer does
+   * its own blur from `mesh.userData.velocity`, so pass 0 there.
+   */
+  blur: number;
   onTap: (body: RapierRigidBody) => void;
 };
+
+/** Smear length at `blur = 1`, as seconds of travel along the velocity (matches canvas2d.ts). */
+const BLUR_SECONDS = 0.16;
+const BLUR_COPIES = 6;
+/** Opacity of the blur copy nearest the body; farther copies fade to ~0. */
+const BLUR_ALPHA = 0.5;
 
 const MAX_HULL_POINTS = 700;
 /** Pointer travel (px) below which a press counts as a tap, not a drag. */
@@ -70,12 +82,14 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, faceCamera, dragSpin, scale, onTap },
+  { bot, color, position, rotation, restitution, faceCamera, dragSpin, scale, blur, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
   const drag = useRef<Drag | null>(null);
   const bodyRef = useRef<RapierRigidBody | null>(null);
+  const meshRef = useRef<THREE.Mesh | null>(null);
+  const ghostsRef = useRef<THREE.Group | null>(null);
   // Keep our own handle and forward to whatever the parent passed (callback or object ref).
   const setRef = useCallback(
     (b: RapierRigidBody | null) => {
@@ -103,6 +117,59 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
   const eyeMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: EYE_COLOR, toneMapped: false }), []);
 
   const body = () => bodyRef.current;
+
+  // Blur ghosts (WebGL only): one material per copy so each has its own alpha.
+  const ghostCount = blur > 0 ? BLUR_COPIES : 0;
+  const ghostMaterials = useMemo(
+    () =>
+      Array.from({ length: ghostCount }, (_, i) => {
+        const opacity = BLUR_ALPHA * (1 - (i + 1) / ghostCount) + 0.04;
+        return {
+          body: new THREE.MeshBasicMaterial({ color, toneMapped: false, transparent: true, opacity, depthWrite: false }),
+          eye: new THREE.MeshBasicMaterial({ color: EYE_COLOR, toneMapped: false, transparent: true, opacity, depthWrite: false }),
+        };
+      }),
+    [color, ghostCount],
+  );
+  useEffect(
+    () => () => {
+      for (const m of ghostMaterials) {
+        m.body.dispose();
+        m.eye.dispose();
+      }
+    },
+    [ghostMaterials],
+  );
+
+  // Publish the velocity for the Canvas 2D renderer's blur, and lay the WebGL
+  // ghosts out behind the body along its velocity.
+  useFrame(() => {
+    const b = bodyRef.current;
+    const mesh = meshRef.current;
+    if (!b || !mesh) return;
+    const v = b.linvel();
+    const vel = (mesh.userData.velocity as THREE.Vector3 | undefined) ?? (mesh.userData.velocity = new THREE.Vector3());
+    vel.set(v.x, v.y, v.z);
+    const ghosts = ghostsRef.current;
+    if (!ghosts) return;
+    const speed = vel.length();
+    const length = speed * blur * BLUR_SECONDS;
+    const parent = mesh.parent;
+    if (!parent || length < 0.02) {
+      ghosts.visible = false;
+      return;
+    }
+    ghosts.visible = true;
+    for (let i = 0; i < ghosts.children.length; i++) {
+      const ghost = ghosts.children[i];
+      const f = (i + 1) / ghosts.children.length;
+      ghost.position.copy(parent.position).addScaledVector(vel, (-length * f) / speed);
+      // Nudge each copy a hair farther from the camera so the solid body and
+      // nearer copies win the depth test where they overlap.
+      ghost.position.z -= 0.002 * (i + 1);
+      ghost.quaternion.copy(parent.quaternion);
+    }
+  });
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
@@ -186,7 +253,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
   const he = bot.halfExtents.clone().multiplyScalar(scale);
   const roundish = Math.abs(he.x - he.y) < 0.15 * scale && Math.abs(he.x - he.z) < 0.35 * scale;
 
-  return (
+  const rigidBody = (
     <RigidBody
       ref={setRef}
       colliders={false}
@@ -209,6 +276,7 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={0} />
       )}
       <mesh
+        ref={meshRef}
         geometry={bot.geometry}
         material={material}
         scale={scale}
@@ -222,5 +290,23 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
         ))}
       </mesh>
     </RigidBody>
+  );
+
+  return (
+    <>
+      {rigidBody}
+      {ghostCount > 0 && (
+        // Outside the RigidBody so physics does not move it; posed each frame above.
+        <group ref={ghostsRef} visible={false}>
+          {ghostMaterials.map((m, i) => (
+            <mesh key={i} geometry={bot.geometry} material={m.body} scale={scale} userData={{ ghost: true }} renderOrder={-1}>
+              {bot.eyes.map((g, j) => (
+                <mesh key={j} geometry={g} material={m.eye} />
+              ))}
+            </mesh>
+          ))}
+        </group>
+      )}
+    </>
   );
 });

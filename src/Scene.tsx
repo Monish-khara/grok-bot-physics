@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { CuboidCollider, Physics, RigidBody, useAfterPhysicsStep, type RapierRigidBody } from "@react-three/rapier";
 import { button, useControls } from "leva";
 import { Bot } from "./Bot";
@@ -54,8 +54,14 @@ type Spawn = {
   spin: Vec3;
 };
 
+const QUERY = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 /** `?lineup` parks the troop in one evenly spaced, upright row — for screenshots. */
-const LINEUP = typeof location !== "undefined" && new URLSearchParams(location.search).has("lineup");
+const LINEUP = QUERY.has("lineup");
+/** `?trail=0.8&blur=1` preset the effect sliders (screenshots, headless checks). */
+const fromQuery = (name: string, fallback: number, max: number) => {
+  const v = Number(QUERY.get(name));
+  return QUERY.has(name) && Number.isFinite(v) ? Math.min(max, Math.max(0, v)) : fallback;
+};
 
 /** A random unit vector, mostly in the view plane (see DEPTH_MIX). */
 function randomDirection(planar: boolean): Vec3 {
@@ -168,6 +174,8 @@ type Settings = {
   spin: number;
   gravity: number;
   restitution: number;
+  trail: number;
+  blur: number;
   impulse: number;
   faceCamera: boolean;
   dragSpin: number;
@@ -220,7 +228,17 @@ function SpeedNormaliser({
   return null;
 }
 
-function World({ settings, generation, quality }: { settings: Settings; generation: number; quality: Quality }) {
+function World({
+  settings,
+  generation,
+  quality,
+  webgl,
+}: {
+  settings: Settings;
+  generation: number;
+  quality: Quality;
+  webgl: boolean;
+}) {
   const { halfWidth, bottomY, topY } = useViewBounds();
   const bots = useMemo(() => getBotGeometries(quality), [quality]);
   const bodies = useRef<(RapierRigidBody | null)[]>([]);
@@ -383,6 +401,7 @@ function World({ settings, generation, quality }: { settings: Settings; generati
           faceCamera={settings.faceCamera}
           dragSpin={settings.dragSpin}
           scale={settings.botScale}
+          blur={webgl ? settings.blur : 0}
           onTap={tap}
         />
       ))}
@@ -396,14 +415,121 @@ function World({ settings, generation, quality }: { settings: Settings; generati
   );
 }
 
-/** The stage is just the tool's paper: a flat colour, no lights, no floor, no shadows. */
-function Stage({ background }: { background: string }) {
+/**
+ * The stage is just the tool's paper: a flat colour, no lights, no floor, no
+ * shadows. While the WebGL fade trail is on, the clear is done by hand (see
+ * WebGLTrail), because a scene background colour forces a full clear.
+ */
+function Stage({ background, manualClear }: { background: string; manualClear: boolean }) {
   return (
     <>
-      <color attach="background" args={[background]} />
+      {!manualClear && <color attach="background" args={[background]} />}
       <CameraRig />
     </>
   );
+}
+
+/** Trail persistence at `trail = 1`, seconds (matches canvas2d.ts). */
+const TRAIL_SECONDS = 2;
+
+/** Hands the Leva effect strengths to the Canvas 2D renderer. */
+function Canvas2DEffects({ trail, blur }: { trail: number; blur: number }) {
+  const gl = useThree((s) => s.gl) as unknown as Canvas2DRenderer;
+  useEffect(() => {
+    if (!gl.isCanvas2DRenderer) return;
+    gl.effects.trail = trail;
+    gl.effects.blur = blur;
+  }, [gl, trail, blur]);
+  return null;
+}
+
+/**
+ * WebGL trail as a fade-clear: the scene accumulates in a float render
+ * target that is washed toward the background colour a little each frame
+ * before the bots are drawn on top, then blitted to the screen. Float
+ * accumulation means the wash really does converge to the background (an
+ * 8-bit alpha fade stalls a few levels short and leaves a permanent ghost),
+ * and a new background colour is simply faded in. With `trail` at 0 this
+ * just renders normally.
+ */
+function WebGLTrail({ trail, background }: { trail: number; background: string }) {
+  const { gl, scene, camera } = useThree();
+  const fx = useMemo(() => {
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const quad = new THREE.PlaneGeometry(2, 2);
+    const fadeMaterial = new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, depthWrite: false, toneMapped: false });
+    const fadeScene = new THREE.Scene().add(new THREE.Mesh(quad, fadeMaterial));
+    const blitMaterial = new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false, toneMapped: false });
+    const blitScene = new THREE.Scene().add(new THREE.Mesh(quad, blitMaterial));
+    return {
+      cam,
+      quad,
+      fadeMaterial,
+      fadeScene,
+      blitMaterial,
+      blitScene,
+      size: new THREE.Vector2(),
+      target: null as THREE.WebGLRenderTarget | null,
+      fresh: true,
+    };
+  }, []);
+  useEffect(
+    () => () => {
+      fx.target?.dispose();
+      fx.quad.dispose();
+      fx.fadeMaterial.dispose();
+      fx.blitMaterial.dispose();
+    },
+    [fx],
+  );
+  // (Re)start the accumulation whenever the trail is switched on.
+  const active = trail > 0;
+  useEffect(() => {
+    fx.fresh = true;
+  }, [fx, active]);
+
+  useFrame((_, dt) => {
+    if (!active) {
+      gl.autoClear = true;
+      gl.setRenderTarget(null);
+      gl.render(scene, camera);
+      return;
+    }
+    const size = gl.getDrawingBufferSize(fx.size);
+    let target = fx.target;
+    if (!target || target.width !== size.x || target.height !== size.y) {
+      target?.dispose();
+      // 32-bit float: a half-float wash can still stall one 8-bit level short
+      // of a light background (ulp near 1.0 is 5e-4); 8-bit stalls several.
+      const floatOk = gl.capabilities.isWebGL2 && gl.extensions.has("EXT_color_buffer_float");
+      target = new THREE.WebGLRenderTarget(size.x, size.y, {
+        type: floatOk ? THREE.FloatType : THREE.UnsignedByteType,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      fx.target = target;
+      fx.blitMaterial.map = target.texture;
+      fx.blitMaterial.needsUpdate = true;
+      fx.fresh = true;
+    }
+    gl.setRenderTarget(target);
+    gl.autoClear = false;
+    if (fx.fresh) {
+      gl.setClearColor(background, 1);
+      gl.clear(true, true, true);
+      fx.fresh = false;
+    }
+    // Wash toward the background: a ghost is down to ~5% after TRAIL_SECONDS * trail.
+    const tau = (TRAIL_SECONDS * trail) / 3;
+    fx.fadeMaterial.color.set(background);
+    fx.fadeMaterial.opacity = 1 - Math.exp(-Math.min(dt, 0.1) / tau);
+    gl.render(fx.fadeScene, fx.cam);
+    gl.clearDepth();
+    gl.render(scene, camera);
+    gl.setRenderTarget(null);
+    gl.render(fx.blitScene, fx.cam);
+  }, 1);
+  return null;
 }
 
 /** Which rasteriser to use: WebGL when the browser allows it, Canvas 2D otherwise. */
@@ -430,6 +556,8 @@ export function Scene() {
     spin: { value: 1.5, min: 0, max: 8, step: 0.1 },
     gravity: { value: 0, min: 0, max: 40, step: 0.5 },
     restitution: { value: 1, min: 0, max: 1, step: 0.01, label: "bounce" },
+    trail: { value: fromQuery("trail", 0, 1), min: 0, max: 1, step: 0.01 },
+    blur: { value: fromQuery("blur", 0, 1), min: 0, max: 1, step: 0.01 },
     impulse: { value: 9, min: 1, max: 30, step: 0.5, label: "impulse strength" },
     dragSpin: { value: 0.35, min: 0.05, max: 1.5, step: 0.05, label: "drag spin" },
     botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
@@ -460,8 +588,20 @@ export function Scene() {
         // Without WebGL, hand R3F a Canvas 2D rasteriser instead of a WebGLRenderer.
         gl={renderer === "canvas2d" ? ({ canvas }) => new Canvas2DRenderer(canvas as HTMLCanvasElement) : undefined}
       >
-        <Stage background={background} />
-        {rapier.ready && <World settings={settings} generation={generation} quality={renderer === "canvas2d" ? "low" : "high"} />}
+        <Stage background={background} manualClear={renderer === "webgl" && settings.trail > 0} />
+        {renderer === "webgl" ? (
+          <WebGLTrail trail={settings.trail} background={background} />
+        ) : (
+          <Canvas2DEffects trail={settings.trail} blur={settings.blur} />
+        )}
+        {rapier.ready && (
+          <World
+            settings={settings}
+            generation={generation}
+            quality={renderer === "canvas2d" ? "low" : "high"}
+            webgl={renderer === "webgl"}
+          />
+        )}
       </Canvas>
       <div className="renderer-label" data-renderer={renderer}>
         {renderer === "webgl" ? "Renderer: WebGL" : `Renderer: Canvas 2D${webgl.ok ? "" : " (WebGL unavailable)"}`}
