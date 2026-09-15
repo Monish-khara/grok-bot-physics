@@ -83,6 +83,27 @@ Two effect sliders, both `0` (off) by default so the plain look is unchanged.
     frame behind the body along its velocity and nudged slightly farther from
     the camera so the solid body wins the depth test. Many extra draws of the
     full-resolution meshes; fine on a GPU, slow under software GL.
+### Snapshot
+
+The `Snapshot` button downloads a PNG of the scene alone — bots, background,
+trails and blur exactly as drawn — at the render canvas's native pixel size
+(so 2× on a Retina display: 2560×1600 for a 1280×800 window). The HUD title,
+renderer label and Leva panel are DOM, not canvas, so they are never in it,
+and the background is baked in (opaque). Filename
+`grok-bots-YYYYMMDD-HHMMSS.png` (local time).
+
+- Canvas 2D: the bitmap persists between frames, so it is read straight off
+  with `canvas.toBlob`. WebGL: the drawing buffer is not preserved, so one
+  frame is drawn first (through the trail pipeline when it is on, with a
+  zero-length wash) and read immediately; no `preserveDrawingBuffer`.
+- Delivery is a normal anchor download. Some embedded browsers (Electron
+  without a download handler, e.g. an in-editor tab) drop those silently: tick
+  **`snapshot in tab`** and the PNG opens in a new tab instead, to save from
+  there. The fallback is also used automatically if the browser lacks the
+  anchor `download` attribute.
+- Test hook: `window.__grokLastSnapshot` holds the last `{ name, size,
+  width, height }`.
+
 - **Cost** (headless Chromium, software Canvas 2D, 1280×800, ten bots): the
   renderer's own JS time stays at ~2.1–2.4 ms/frame with everything on; what
   grows is rasterisation of the extra fills (≈360 per frame at `trail 1`,
@@ -180,6 +201,8 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   - `face camera` — off by default (full 3D tumbling). On: bots keep their
     face toward the viewer (no depth travel, spin only about the view axis).
   - `Respawn` — re-spreads all ten bots with new headings and reshuffled colors.
+  - `Snapshot` — downloads the scene as a PNG (see above); `snapshot in tab`
+    opens it in a new tab instead, for browsers that block downloads.
 
 Works with touch on mobile; the panel starts collapsed on narrow screens.
 Add `?lineup` to the URL to start the bots in one evenly spaced, upright row
