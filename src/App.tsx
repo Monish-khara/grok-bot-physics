@@ -10,10 +10,10 @@ export default function App() {
         <Scene />
       </SceneErrorBoundary>
       <header className="hud">
-        <h1>Grok Bots · Cloud Racetrack</h1>
-        <p>Tap a racer to boost it. Tap the cloud to wobble it, drag it to turn it.</p>
+        <h1>Grok Bots · Russian Doll</h1>
+        <p>The dome peels off layer by layer, then stacks back up. Tap it to peel the next layer now.</p>
       </header>
-      <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Physics" }} />
+      <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Nesting" }} />
     </div>
   );
 }
