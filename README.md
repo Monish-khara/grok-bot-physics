@@ -13,6 +13,81 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `sphere` — the bots inside the Sphere
+
+Branched from `fly`. The rectangular box is replaced by the silhouette of the
+Las Vegas Sphere's Exosphere — a circle with its bottom sliced off by a flat
+base — drawn as a light grey shape on a dark grey field, and a `mode` toggle
+at the top of the panel switches between **Drop** (the bots fall and settle
+on the base) and **Fly** (the zero-gravity screensaver, now bouncing off the
+curve).
+
+![Drop mode: the bots settled on the Sphere's flat base](docs/screenshot-sphere-drop.png)
+
+![Fly mode with trails and blur, clipped to the Sphere (Canvas 2D renderer)](docs/screenshot-sphere-fly.png)
+
+- **Shape** (`src/sphereShape.ts`): the real Exosphere is ~516 ft wide by
+  366 ft tall, i.e. height = 0.71 × diameter, so the shape is a circle of
+  radius `R` cut by a horizontal chord at `y = -0.42 R` (height `1.42 R`).
+  `fitSphere` sizes `R` to the viewport with a 0.45-unit margin and centres
+  the shape; it is recomputed on resize. One definition feeds the physics
+  walls, both renderers' backdrops, spawn sampling and the test hooks.
+- **Physics:** the four frustum walls are gone. The arc is a static ring of
+  96 thin cuboid colliders whose inner faces lie on the circle (each slightly
+  overlong so there are no gaps at the joints), the base is one flat collider
+  along the chord, and the shallow front/back planes stay. Bot colliders are
+  unchanged.
+- **Visual:** the interior is filled behind the bots and everything outside
+  is another colour. Two Leva colours replace `background`: `sphere`
+  (interior, default `#d9d9d9`) and `outside` (default `#4a4a4a`, also the
+  page colour). Canvas 2D fills the outside, fills the shape as a `Path2D`,
+  then clips to it, so bodies, trails and blur ghosts never leave the
+  interior. WebGL renders the scene into the float render target (cleared or
+  washed to the interior colour), clears the screen to the outside colour and
+  draws the target through a flat mesh triangulated from the same outline,
+  textured in screen space — which is what clips the trails and blur.
+- **Spawn:** positions are rejection-sampled inside the shape, inset from the
+  walls by 0.7 of a bot and spaced at least a bot apart (relaxed if the
+  Sphere is small). Drop samples the upper half so the fall is visible.
+- **Mode** — `mode: Drop | Fly` is the first row of the panel; `?mode=fly`
+  (or `drop`) picks the starting mode, default Drop.
+  - *Drop:* gravity 9.8, bounce 0.4, friction 0.6, linear/angular damping
+    0.15 / 1.4, bodies may sleep, the speed normaliser is off, trail and blur
+    are forced to 0, and the `face seeking` weeble torque from `master` is
+    back (it swings a tumbling bot toward face-forward; the torque skips
+    sleeping bodies and never resets their sleep timer, so a slab rocking on
+    its face settles instead of jiggling forever). Tapping a bot kicks it
+    upward; tapping empty space is a radial burst from the click point.
+  - *Fly:* gravity 0, bounce 1, no friction or damping, never sleeps, the
+    normaliser holds every bot at `speed`, `trail` defaults to 0.6 and `blur`
+    to 0.7 with their sliders visible (`?trail=&blur=` still preset them).
+    Taps and scatters behave as on `fly`.
+  - Each mode keeps its own sliders (only the active mode's are shown), so
+    tweaks persist when switching back and forth. Switching respawns the
+    troop under the new rules and swaps the physics live.
+- **Kept:** tap impulse, empty-click scatter, drag-to-rotate and flick,
+  `bot scale`, `face camera`, `Respawn`, `Snapshot` (the PNG is the whole
+  framed Sphere including the outside colour) and the WebGL / Canvas 2D
+  auto-detect.
+- **Run alongside the other branches:** worktree `~/repos/grok-bot-physics-sphere`,
+  port `4734` (`master` 4731, `canvas2d` 4732, `fly` 4733):
+
+  ```bash
+  cd ~/repos/grok-bot-physics-sphere
+  npm install
+  npm run dev -- --port 4734 --strictPort
+  # → http://127.0.0.1:4734/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-sphere bash -lc 'cd ~/repos/grok-bot-physics-sphere && npm run dev -- --port 4734 --strictPort 2>&1 | tee /tmp/grok-bot-physics-sphere.log'`.
+- **Test hooks:** `window.__grokBotBounds()` now returns the fitted shape
+  `{ cx, cy, r, chordY, mode }`; positions and velocities as before. Verified
+  headless (1280×800) with WebGL disabled (Canvas 2D) and with SwiftShader
+  WebGL: 60 s of Fly with no bot centre outside the truncated circle and
+  speeds within 0.001 of the target; 30 s of Drop with all ten asleep on the
+  base and none through the arc; five mode toggles with ten bodies, no
+  console errors and a flat JS heap.
+
 ## This branch: `fly` — zero-gravity bounce
 
 Branched from `canvas2d` (so it keeps the WebGL / Canvas 2D auto-detect and
@@ -179,19 +254,22 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
 - **Drag a bot** — turns it in place like a tile in the tool (yaw with
   horizontal drag, pitch with vertical, 0.35°/px by default); release with a
   flick to spin it and send it off that way. It is held still while dragged.
-- **Tap / click empty space** — every bot picks a new random heading and spin.
+- **Tap / click empty space** — Fly: every bot picks a new random heading and
+  spin. Drop: a radial burst from the click point.
 - **Leva panel (top right)**
-  - `background` — first row: RGB colour picker for the stage (click the
-    swatch for the picker, or type a hex). Default white, like the tool.
-    Applies live to both the canvas clear colour and the page behind it; the
-    HUD text flips light on dark backgrounds.
-  - `speed` — flight speed every bot is held at, world units per second.
-  - `spin` — angular speed at spawn and the cap collisions may not exceed.
-  - `gravity` — downward acceleration, default 0. Above 0 the normaliser
-    switches off and the bots fall and bounce.
-  - `bounce` — collider restitution (1 = fully elastic).
-  - `trail` — persistence of the colour trail each bot leaves (0 = off).
-  - `blur` — speed blur along each bot's velocity (0 = off).
+  - `mode` — first row: `Drop` or `Fly` (see the `sphere` section above).
+    Switching respawns the troop. `?mode=fly` starts in Fly.
+  - `sphere` / `outside` — colour pickers for the Sphere's interior and the
+    field around it (click the swatch, or type a hex). Defaults `#d9d9d9` and
+    `#4a4a4a`. Live; the page takes the outside colour and the HUD text flips
+    light or dark to match.
+  - Drop only: `gravity` (9.8), `bounce` (0.4), `friction` (0.6),
+    `face seeking` (weeble torque toward face-forward, 0 = off).
+  - Fly only: `speed` — flight speed every bot is held at, world units per
+    second; `spin` — angular speed at spawn and the cap collisions may not
+    exceed; `bounce` (1 = fully elastic); `trail` — persistence of the colour
+    trail each bot leaves (0 = off); `blur` — speed blur along each bot's
+    velocity (0 = off).
   - `impulse strength` — size of the tap shove.
   - `drag spin` — degrees of rotation per pixel of drag.
   - `bot scale` — 0.5×–2× size multiplier for every bot, applied live to the
