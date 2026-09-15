@@ -37,6 +37,12 @@ export class Canvas2DRenderer {
   frames = 0;
   /** Effect strengths, 0–1 each; 0 disables. Set by the scene from the Leva panel. */
   effects = { trail: 0, blur: 0 };
+  /**
+   * Framed backdrop: `outline` is a closed polygon in world units (x, y
+   * pairs) filled with `inside`; everything else is `outside`, and bodies,
+   * trails and blur are clipped to the polygon. Null: flat scene background.
+   */
+  stage: { outline: Float32Array; inside: string; outside: string } | null = null;
   /** Extra fills drawn last frame for trails and blur, for profiling. */
   ghostFills = 0;
 
@@ -157,17 +163,37 @@ export class Canvas2DRenderer {
 
     const { width, height } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const bg = scene.background;
-    if (bg instanceof THREE.Color) {
-      ctx.fillStyle = `#${bg.getHexString()}`;
-      ctx.fillRect(0, 0, width, height);
-    } else {
-      ctx.clearRect(0, 0, width, height);
-    }
-
     this.viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     // Unit vector from the scene toward the camera (orthographic: constant).
     this.toCamera.set(0, 0, 1).transformDirection(camera.matrixWorld);
+
+    const stage = this.stage;
+    if (stage) {
+      ctx.fillStyle = stage.outside;
+      ctx.fillRect(0, 0, width, height);
+      const frame = new Path2D();
+      const pts = stage.outline;
+      for (let i = 0; i < pts.length; i += 2) {
+        this.tmpV.set(pts[i], pts[i + 1], 0);
+        this.project(this.tmpV);
+        if (i === 0) frame.moveTo(this.tmpV.x, this.tmpV.y);
+        else frame.lineTo(this.tmpV.x, this.tmpV.y);
+      }
+      frame.closePath();
+      ctx.fillStyle = stage.inside;
+      ctx.fill(frame);
+      // Nothing drawn from here on may leave the frame.
+      ctx.save();
+      ctx.clip(frame);
+    } else {
+      const bg = scene.background;
+      if (bg instanceof THREE.Color) {
+        ctx.fillStyle = `#${bg.getHexString()}`;
+        ctx.fillRect(0, 0, width, height);
+      } else {
+        ctx.clearRect(0, 0, width, height);
+      }
+    }
 
     // Top-level meshes are bodies (or the click-catcher plane); mesh children
     // of a body are its eyes. WebGL-only blur ghosts are tagged and skipped.
@@ -232,6 +258,7 @@ export class Canvas2DRenderer {
       }
     }
     this.phases.fill += performance.now() - tf;
+    if (stage) ctx.restore();
 
     const dt = performance.now() - t0;
     this.frames++;

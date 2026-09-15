@@ -17,6 +17,11 @@ type Props = {
   position: [number, number, number];
   rotation: [number, number, number];
   restitution: number;
+  friction: number;
+  linearDamping: number;
+  angularDamping: number;
+  /** Drop mode lets settled bots sleep; Fly mode never does. Immutable per body (respawn applies it). */
+  canSleep: boolean;
   /** Keep the face toward the camera: no depth travel, spin only about Z. */
   faceCamera: boolean;
   /** Degrees of spin per pixel of drag, applied as angular velocity. */
@@ -82,7 +87,7 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
-  { bot, color, position, rotation, restitution, faceCamera, dragSpin, scale, blur, onTap },
+  { bot, color, position, rotation, restitution, friction, linearDamping, angularDamping, canSleep, faceCamera, dragSpin, scale, blur, onTap },
   ref,
 ) {
   const { rapier } = useRapier();
@@ -260,20 +265,20 @@ export const Bot = forwardRef<RapierRigidBody, Props>(function Bot(
       position={position}
       rotation={rotation}
       restitution={restitution}
-      friction={0}
-      linearDamping={0}
-      angularDamping={0}
+      friction={friction}
+      linearDamping={linearDamping}
+      angularDamping={angularDamping}
       enabledTranslations={[true, true, !faceCamera]}
       enabledRotations={[!faceCamera, !faceCamera, true]}
       ccd
-      canSleep={false}
+      canSleep={canSleep}
     >
       {hull ? (
-        <ConvexHullCollider args={[hull]} restitution={restitution} friction={0} />
+        <ConvexHullCollider args={[hull]} restitution={restitution} friction={friction} />
       ) : roundish ? (
-        <BallCollider args={[Math.max(he.x, he.y)]} restitution={restitution} friction={0} />
+        <BallCollider args={[Math.max(he.x, he.y)]} restitution={restitution} friction={friction} />
       ) : (
-        <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={0} />
+        <CuboidCollider args={[he.x, he.y, he.z]} restitution={restitution} friction={friction} />
       )}
       <mesh
         ref={meshRef}
