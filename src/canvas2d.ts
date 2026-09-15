@@ -299,7 +299,7 @@ export class Canvas2DRenderer {
         const eyePath = this.buildPath(eye);
         if (eyePath) eyes.push({ path: eyePath, color: colorOf(eye.material) });
       }
-      frame.push({ mesh, path: bodyPath, color: colorOf(mesh.material), eyes });
+      frame.push({ mesh, path: bodyPath, color: colorOf(mesh.material), alpha: alphaOf(mesh.material), eyes });
     }
 
     if (live || transparent) this.drawTrails(ctx, frame, trail, now, live);
@@ -307,6 +307,8 @@ export class Canvas2DRenderer {
     const tf = performance.now();
     for (const body of frame) {
       if (blur > 0) this.drawBlur(ctx, body, blur);
+      // A translucent material (a fading body) fills at its opacity.
+      ctx.globalAlpha = body.alpha;
       ctx.fillStyle = body.color;
       ctx.fill(body.path, "nonzero");
       // The pill is mostly buried in the body; clipping to the body's
@@ -320,6 +322,7 @@ export class Canvas2DRenderer {
         }
         ctx.restore();
       }
+      ctx.globalAlpha = 1;
     }
     this.phases.fill += performance.now() - tf;
     if (stage) ctx.restore();
@@ -650,6 +653,8 @@ type BodyFrame = {
   mesh: THREE.Mesh;
   path: Path2D;
   color: string;
+  /** Fill opacity, from a transparent material; 1 otherwise. */
+  alpha: number;
   eyes: { path: Path2D; color: string }[];
 };
 
@@ -676,6 +681,11 @@ function isDrawable(material: THREE.Material | THREE.Material[]): boolean {
   if (!m || m.visible === false) return false;
   if (m.transparent && m.opacity <= 0.01) return false;
   return "color" in m;
+}
+
+function alphaOf(material: THREE.Material | THREE.Material[]): number {
+  const m = Array.isArray(material) ? material[0] : material;
+  return m && m.transparent ? Math.max(0, Math.min(1, m.opacity)) : 1;
 }
 
 function colorOf(material: THREE.Material | THREE.Material[]): string {
