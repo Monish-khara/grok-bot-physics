@@ -1,0 +1,127 @@
+name: GitHub Pages
+
+# One static site from four branches:
+#   /            sphere    (the Sphere container, Drop | Fly)
+#   /drop/       master    (the original physics drop)
+#   /fly/        fly       (zero-gravity bounce)
+#   /canvas2d/   canvas2d  (Canvas 2D fallback branch)
+#   /variants/   index linking all four
+# A push to any of the four branches rebuilds the whole site from each
+# branch's current head. GitHub only runs push workflows that exist on the
+# pushed branch, so keep this file identical on all four (cherry-pick).
+
+on:
+  push:
+    branches: [master, sphere, fly, canvas2d]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - branch: sphere
+            path: ""
+          - branch: master
+            path: drop/
+          - branch: fly
+            path: fly/
+          - branch: canvas2d
+            path: canvas2d/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vite build --base=/grok-bot-physics/${{ matrix.path }} --outDir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-${{ matrix.branch }}
+          path: dist
+          retention-days: 1
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-sphere
+          path: site
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-master
+          path: site/drop
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-fly
+          path: site/fly
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-canvas2d
+          path: site/canvas2d
+      - name: Variants index
+        run: |
+          mkdir -p site/variants
+          cat > site/variants/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Grok Bots · variants</title>
+          <style>
+            body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #4a4a4a; color: #f4f1ec;
+                   font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+            main { max-width: 34rem; padding: 2rem; }
+            h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+            ul { list-style: none; padding: 0; margin: 0; display: grid; gap: .75rem; }
+            a { display: block; padding: .9rem 1.1rem; border-radius: 12px; background: #d9d9d9; color: #2a2724; text-decoration: none; }
+            a:hover { background: #fff; }
+            a b { display: block; }
+            a span { color: #6c665f; font-size: .9rem; }
+          </style>
+          </head>
+          <body>
+          <main>
+            <h1>Grok Bots · physics variants</h1>
+            <ul>
+              <li><a href="../"><b>Sphere</b><span>the bots inside the Sphere — Drop or Fly (branch <code>sphere</code>)</span></a></li>
+              <li><a href="../?mode=fly"><b>Sphere · Fly</b><span>same, starting in zero-g Fly mode with trails</span></a></li>
+              <li><a href="../drop/"><b>Drop</b><span>the original physics drop into a box (branch <code>master</code>)</span></a></li>
+              <li><a href="../fly/"><b>Fly</b><span>zero-gravity screensaver bounce (branch <code>fly</code>)</span></a></li>
+              <li><a href="../canvas2d/"><b>Canvas 2D</b><span>drop with the no-WebGL renderer fallback (branch <code>canvas2d</code>)</span></a></li>
+            </ul>
+          </main>
+          </body>
+          </html>
+          EOF
+          touch site/.nojekyll
+          find site -maxdepth 2 -name index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: assemble
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
