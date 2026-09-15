@@ -155,6 +155,32 @@ export class Canvas2DRenderer {
     return { differing, total: w * h };
   }
 
+  /**
+   * Snapshot frame: the scene as last drawn, at native pixel size, into a
+   * fresh canvas with no outside fill — the stage polygon holds the interior
+   * colour, bodies, trails (from the live history, which is left untouched)
+   * and blur; everything else is transparent, and the polygon's edge is
+   * anti-aliased. Null until a frame has been rendered.
+   */
+  snapshot(scene = this.lastScene, camera = this.lastCamera): HTMLCanvasElement | null {
+    if (!scene || !camera) return null;
+    const c = document.createElement("canvas");
+    c.width = this.domElement.width;
+    c.height = this.domElement.height;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+    this.transparentOutside = true;
+    try {
+      this.renderTo(ctx, this.dpr, scene, camera);
+    } finally {
+      this.transparentOutside = false;
+    }
+    return c;
+  }
+
+  /** While set, `renderTo` leaves everything outside the stage polygon transparent. */
+  private transparentOutside = false;
+
   private renderTo(ctx: CanvasRenderingContext2D, dpr: number, scene: THREE.Scene, camera: THREE.Camera) {
     const t0 = performance.now();
     this.phases.project = this.phases.path = this.phases.fill = this.phases.triangles = this.phases.trails = 0;
@@ -168,9 +194,15 @@ export class Canvas2DRenderer {
     this.toCamera.set(0, 0, 1).transformDirection(camera.matrixWorld);
 
     const stage = this.stage;
+    const transparent = this.transparentOutside;
+    let stagePath: Path2D | null = null;
     if (stage) {
-      ctx.fillStyle = stage.outside;
-      ctx.fillRect(0, 0, width, height);
+      if (transparent) {
+        ctx.clearRect(0, 0, width, height);
+      } else {
+        ctx.fillStyle = stage.outside;
+        ctx.fillRect(0, 0, width, height);
+      }
       const frame = new Path2D();
       const pts = stage.outline;
       for (let i = 0; i < pts.length; i += 2) {
@@ -180,6 +212,7 @@ export class Canvas2DRenderer {
         else frame.lineTo(this.tmpV.x, this.tmpV.y);
       }
       frame.closePath();
+      stagePath = frame;
       ctx.fillStyle = stage.inside;
       ctx.fill(frame);
       // Nothing drawn from here on may leave the frame.
@@ -210,7 +243,9 @@ export class Canvas2DRenderer {
     // View space looks down -Z: more negative is farther. Draw far first.
     this.bodies.sort((a, b) => a.depth - b.depth);
 
-    const live = ctx === this.ctx; // offscreen ground-truth renders must not touch trail state
+    // Only the on-screen frame advances the trail history; a snapshot draws
+    // it as it stands, and ground-truth compare renders skip it entirely.
+    const live = ctx === this.ctx;
     const now = t0;
     const { trail, blur } = this.effects;
     this.ghostFills = 0;
@@ -238,7 +273,7 @@ export class Canvas2DRenderer {
       frame.push({ mesh, path: bodyPath, color: colorOf(mesh.material), eyes });
     }
 
-    if (live) this.drawTrails(ctx, frame, trail, now);
+    if (live || transparent) this.drawTrails(ctx, frame, trail, now, live);
 
     const tf = performance.now();
     for (const body of frame) {
@@ -259,6 +294,14 @@ export class Canvas2DRenderer {
     }
     this.phases.fill += performance.now() - tf;
     if (stage) ctx.restore();
+    if (stagePath && transparent) {
+      // The clip's edge may be aliased in some browsers; keying the whole
+      // frame through an ordinary (anti-aliased) fill of the same path
+      // guarantees a soft edge against the transparent outside.
+      ctx.globalCompositeOperation = "destination-in";
+      ctx.fill(stagePath);
+      ctx.globalCompositeOperation = "source-over";
+    }
 
     const dt = performance.now() - t0;
     this.frames++;
@@ -404,36 +447,38 @@ export class Canvas2DRenderer {
    * alive per body, so the cost is bounded) and skipped while a body is
    * parked, so a dragged bot does not stack copies into a solid blot.
    */
-  private drawTrails(ctx: CanvasRenderingContext2D, frame: BodyFrame[], trail: number, now: number) {
+  private drawTrails(ctx: CanvasRenderingContext2D, frame: BodyFrame[], trail: number, now: number, record: boolean) {
     if (trail <= 0) {
-      if (this.trails.size) this.trails.clear();
+      if (record && this.trails.size) this.trails.clear();
       return;
     }
     const life = TRAIL_SECONDS * trail;
     const interval = Math.max(1000 / 60, (life * 1000) / TRAIL_SNAPSHOTS);
-    const seen = new Set<THREE.Mesh>();
-    for (const body of frame) {
-      seen.add(body.mesh);
-      let h = this.trails.get(body.mesh);
-      if (!h) {
-        h = { snapshots: [], lastAt: -Infinity, lastX: NaN, lastY: NaN };
-        this.trails.set(body.mesh, h);
+    if (record) {
+      const seen = new Set<THREE.Mesh>();
+      for (const body of frame) {
+        seen.add(body.mesh);
+        let h = this.trails.get(body.mesh);
+        if (!h) {
+          h = { snapshots: [], lastAt: -Infinity, lastX: NaN, lastY: NaN };
+          this.trails.set(body.mesh, h);
+        }
+        this.tmpV.setFromMatrixPosition(body.mesh.matrixWorld);
+        this.project(this.tmpV);
+        const moved = Math.hypot(this.tmpV.x - h.lastX, this.tmpV.y - h.lastY);
+        if (now - h.lastAt >= interval && !(moved < 2)) {
+          h.snapshots.push({ path: body.path, color: body.color, at: now });
+          h.lastAt = now;
+          h.lastX = this.tmpV.x;
+          h.lastY = this.tmpV.y;
+          if (h.snapshots.length > TRAIL_SNAPSHOTS) h.snapshots.shift();
+        }
       }
-      this.tmpV.setFromMatrixPosition(body.mesh.matrixWorld);
-      this.project(this.tmpV);
-      const moved = Math.hypot(this.tmpV.x - h.lastX, this.tmpV.y - h.lastY);
-      if (now - h.lastAt >= interval && !(moved < 2)) {
-        h.snapshots.push({ path: body.path, color: body.color, at: now });
-        h.lastAt = now;
-        h.lastX = this.tmpV.x;
-        h.lastY = this.tmpV.y;
-        if (h.snapshots.length > TRAIL_SNAPSHOTS) h.snapshots.shift();
+      // Bodies that vanished (respawn) keep fading out, then drop off.
+      for (const [mesh, h] of this.trails) {
+        while (h.snapshots.length && now - h.snapshots[0].at > life * 1000) h.snapshots.shift();
+        if (!h.snapshots.length && !seen.has(mesh)) this.trails.delete(mesh);
       }
-    }
-    // Bodies that vanished (respawn) keep fading out, then drop off.
-    for (const [mesh, h] of this.trails) {
-      while (h.snapshots.length && now - h.snapshots[0].at > life * 1000) h.snapshots.shift();
-      if (!h.snapshots.length && !seen.has(mesh)) this.trails.delete(mesh);
     }
     const tg = performance.now();
     // Oldest first across all bodies, so a fresh ghost never hides under a stale one.

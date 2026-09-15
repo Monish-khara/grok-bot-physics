@@ -490,6 +490,9 @@ function World({
 /** Trail persistence at `trail = 1`, seconds (matches canvas2d.ts). */
 const TRAIL_SECONDS = 2;
 
+/** Draws one WebGL frame on demand (dt 0: no trail wash); see WebGLStage. */
+type DrawFrame = (dt: number, transparentOutside?: boolean) => void;
+
 /** Hands the Sphere backdrop and the effect strengths to the Canvas 2D renderer. */
 function Canvas2DStage({ sphere, inside, outside, trail, blur }: { sphere: Sphere; inside: string; outside: string; trail: number; blur: number }) {
   const gl = useThree((s) => s.gl) as unknown as Canvas2DRenderer;
@@ -524,7 +527,7 @@ function WebGLStage({
   outside: string;
   trail: number;
   /** Receives a function that draws one frame on demand (dt 0: no wash), for snapshots. */
-  drawRef: React.RefObject<((dt: number) => void) | null>;
+  drawRef: React.RefObject<DrawFrame | null>;
 }) {
   const { gl, scene, camera } = useThree();
   const fx = useMemo(() => {
@@ -589,7 +592,12 @@ function WebGLStage({
     fx.fresh = true;
   }, [fx, active]);
 
-  const draw = (dt: number) => {
+  /**
+   * One frame. `transparentOutside` (snapshots) clears the screen to alpha 0
+   * instead of the outside colour, so only the Sphere mesh — interior colour,
+   * bots, trails, blur — lands in the drawing buffer, with MSAA at its edge.
+   */
+  const draw = (dt: number, transparentOutside = false) => {
     const size = gl.getDrawingBufferSize(fx.size);
     let target = fx.target;
     if (!target || target.width !== size.x || target.height !== size.y) {
@@ -637,7 +645,8 @@ function WebGLStage({
     }
     uv.needsUpdate = true;
     gl.setRenderTarget(null);
-    gl.setClearColor(outside, 1);
+    if (transparentOutside) gl.setClearColor(0x000000, 0);
+    else gl.setClearColor(outside, 1);
     gl.clear(true, true, true);
     gl.render(fx.frameScene, camera);
   };
@@ -655,35 +664,71 @@ function snapshotName(d = new Date()) {
 }
 
 /**
- * Snapshot: the render canvas alone — the framed Sphere with its outside
- * colour, bots, trails and blur as drawn, at native pixel size — as a PNG.
- * The HUD, renderer label and Leva panel are DOM, not canvas, so they are
- * never in it. The Canvas 2D bitmap persists between frames; WebGL's drawing
- * buffer does not, so a frame is drawn right before reading it.
+ * Snapshot: just the Sphere — the interior colour with the bots, trails and
+ * blur inside it, everything outside the truncated circle transparent — as
+ * a PNG cropped to the shape's bounding box at native pixel size. The HUD,
+ * renderer label and Leva panel are DOM, not canvas, so they are never in it.
+ *
+ * Canvas 2D: the renderer redraws the last frame into an offscreen canvas
+ * with no outside fill (`snapshot()`), reusing the live trail history. WebGL:
+ * a frame is drawn with the screen cleared to alpha 0 so only the Sphere
+ * mesh lands in the drawing buffer (MSAA edge), copied out, and the normal
+ * frame is drawn straight back so nothing flashes.
  */
 function Snapshot({
+  sphere,
   captureRef,
   drawRef,
   openInTab,
 }: {
+  sphere: Sphere;
   captureRef: React.RefObject<(() => void) | null>;
-  drawRef: React.RefObject<((dt: number) => void) | null>;
+  drawRef: React.RefObject<DrawFrame | null>;
   openInTab: boolean;
 }) {
   const { gl, scene, camera } = useThree();
   useEffect(() => {
     captureRef.current = () => {
-      const canvas = gl.domElement;
-      if (!(gl as unknown as Canvas2DRenderer).isCanvas2DRenderer) {
-        if (drawRef.current) drawRef.current(0);
-        else gl.render(scene, camera);
+      const source = gl.domElement;
+      // Shape bounding box in device pixels (orthographic: corners project exactly).
+      const v = new THREE.Vector3();
+      const toPx = (x: number, y: number) => {
+        v.set(x, y, 0).project(camera);
+        return [((v.x + 1) / 2) * source.width, ((1 - v.y) / 2) * source.height] as const;
+      };
+      const [x0, y0] = toPx(sphere.cx - sphere.r, sphere.cy + sphere.r);
+      const [x1, y1] = toPx(sphere.cx + sphere.r, sphere.chordY);
+      const left = Math.max(0, Math.floor(x0));
+      const top = Math.max(0, Math.floor(y0));
+      const width = Math.min(source.width, Math.ceil(x1)) - left;
+      const height = Math.min(source.height, Math.ceil(y1)) - top;
+      if (width <= 0 || height <= 0) return;
+
+      const out = document.createElement("canvas");
+      out.width = width;
+      out.height = height;
+      const ctx = out.getContext("2d");
+      if (!ctx) return;
+      const c2d = gl as unknown as Canvas2DRenderer;
+      if (c2d.isCanvas2DRenderer) {
+        const frame = c2d.snapshot(scene, camera);
+        if (!frame) return;
+        ctx.drawImage(frame, -left, -top);
+      } else if (drawRef.current) {
+        drawRef.current(0, true);
+        ctx.drawImage(source, -left, -top);
+        drawRef.current(0);
+      } else {
+        gl.render(scene, camera);
+        ctx.drawImage(source, -left, -top);
       }
+
       const name = snapshotName();
-      canvas.toBlob((blob) => {
+      out.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
         const w = window as unknown as { __grokLastSnapshot?: { name: string; size: number; width: number; height: number } };
-        w.__grokLastSnapshot = { name, size: blob.size, width: canvas.width, height: canvas.height };
+        w.__grokLastSnapshot = { name, size: blob.size, width: out.width, height: out.height };
         // Some embedded browsers (Electron without a download handler) drop
         // anchor downloads silently; the "snapshot in tab" toggle shows the
         // PNG in a new tab instead, to save from there.
@@ -702,7 +747,7 @@ function Snapshot({
         setTimeout(() => URL.revokeObjectURL(url), 10_000);
       }, "image/png");
     };
-  }, [gl, scene, camera, captureRef, drawRef, openInTab]);
+  }, [gl, scene, camera, sphere, captureRef, drawRef, openInTab]);
   return null;
 }
 
@@ -725,6 +770,8 @@ function Framed({
   renderer,
   ready,
   drawRef,
+  captureRef,
+  snapshotInTab,
 }: {
   physics: Physics;
   inside: string;
@@ -732,12 +779,15 @@ function Framed({
   generation: number;
   renderer: RendererKind;
   ready: boolean;
-  drawRef: React.RefObject<((dt: number) => void) | null>;
+  drawRef: React.RefObject<DrawFrame | null>;
+  captureRef: React.RefObject<(() => void) | null>;
+  snapshotInTab: boolean;
 }) {
   const sphere = useSphere();
   return (
     <>
       <CameraRig />
+      <Snapshot sphere={sphere} captureRef={captureRef} drawRef={drawRef} openInTab={snapshotInTab} />
       {renderer === "webgl" ? (
         <WebGLStage sphere={sphere} inside={inside} outside={outside} trail={physics.trail} drawRef={drawRef} />
       ) : (
@@ -763,7 +813,7 @@ export function Scene() {
   const rapier = useRapierReady();
   const globalError = useGlobalErrors();
   const captureRef = useRef<(() => void) | null>(null);
-  const drawRef = useRef<((dt: number) => void) | null>(null);
+  const drawRef = useRef<DrawFrame | null>(null);
 
   // Each mode has its own sliders (shown only in that mode), so tweaks
   // persist when switching back and forth.
@@ -856,8 +906,9 @@ export function Scene() {
           renderer={renderer}
           ready={rapier.ready}
           drawRef={drawRef}
+          captureRef={captureRef}
+          snapshotInTab={settings.snapshotTab}
         />
-        <Snapshot captureRef={captureRef} drawRef={drawRef} openInTab={settings.snapshotTab} />
       </Canvas>
       <div className="renderer-label" data-renderer={renderer}>
         {renderer === "webgl" ? "Renderer: WebGL" : `Renderer: Canvas 2D${webgl.ok ? "" : " (WebGL unavailable)"}`}
