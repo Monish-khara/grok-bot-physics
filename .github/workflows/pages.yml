@@ -5,14 +5,15 @@ name: GitHub Pages
 #   /drop/       master    (the original physics drop)
 #   /fly/        fly       (zero-gravity bounce)
 #   /canvas2d/   canvas2d  (Canvas 2D fallback branch)
-#   /variants/   index linking all four
-# A push to any of the four branches rebuilds the whole site from each
-# branch's current head. GitHub only runs push workflows that exist on the
-# pushed branch, so keep this file identical on all four (cherry-pick).
+#   /racetrack/  racetrack (cloud racetrack: true offset-path strokes, kinematic racers)
+#   /variants/   index linking all of them
+# A push to any of these branches rebuilds the whole site from each branch's
+# current head. GitHub only runs push workflows that exist on the pushed
+# branch, so keep this file identical on all of them (cherry-pick).
 
 on:
   push:
-    branches: [master, sphere, fly, canvas2d]
+    branches: [master, sphere, fly, canvas2d, racetrack]
   workflow_dispatch:
 
 permissions:
@@ -38,6 +39,8 @@ jobs:
             path: fly/
           - branch: canvas2d
             path: canvas2d/
+          - branch: racetrack
+            path: racetrack/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,6 +77,10 @@ jobs:
         with:
           name: site-canvas2d
           path: site/canvas2d
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-racetrack
+          path: site/racetrack
       - name: Variants index
         run: |
           mkdir -p site/variants
@@ -105,6 +112,7 @@ jobs:
               <li><a href="../drop/"><b>Drop</b><span>the original physics drop into a box (branch <code>master</code>)</span></a></li>
               <li><a href="../fly/"><b>Fly</b><span>zero-gravity screensaver bounce (branch <code>fly</code>)</span></a></li>
               <li><a href="../canvas2d/"><b>Canvas 2D</b><span>drop with the no-WebGL renderer fallback (branch <code>canvas2d</code>)</span></a></li>
+              <li><a href="../racetrack/"><b>Cloud Racetrack</b><span>the cloud in the Sphere with true offset-path track strokes and nine racers (branch <code>racetrack</code>)</span></a></li>
             </ul>
           </main>
           </body>
