@@ -452,12 +452,30 @@ function Canvas2DEffects({ trail, blur }: { trail: number; blur: number }) {
  * and a new background colour is simply faded in. With `trail` at 0 this
  * just renders normally.
  */
-function WebGLTrail({ trail, background }: { trail: number; background: string }) {
+function WebGLTrail({
+  trail,
+  background,
+  drawRef,
+}: {
+  trail: number;
+  background: string;
+  /** Receives a function that draws one frame on demand (dt 0: no wash), for snapshots. */
+  drawRef: React.RefObject<((dt: number) => void) | null>;
+}) {
   const { gl, scene, camera } = useThree();
   const fx = useMemo(() => {
     const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const quad = new THREE.PlaneGeometry(2, 2);
     const fadeMaterial = new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, depthWrite: false, toneMapped: false });
+    // Wash the colour only; leave alpha at the opaque 1 the clear wrote.
+    // Plain blending would pull the buffer's alpha toward the wash opacity,
+    // invisible on screen (the page behind is the same colour) but it would
+    // make snapshots of trail frames semi-transparent.
+    fadeMaterial.blending = THREE.CustomBlending;
+    fadeMaterial.blendSrc = THREE.SrcAlphaFactor;
+    fadeMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
+    fadeMaterial.blendSrcAlpha = THREE.ZeroFactor;
+    fadeMaterial.blendDstAlpha = THREE.OneFactor;
     const fadeScene = new THREE.Scene().add(new THREE.Mesh(quad, fadeMaterial));
     const blitMaterial = new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false, toneMapped: false });
     const blitScene = new THREE.Scene().add(new THREE.Mesh(quad, blitMaterial));
@@ -488,7 +506,7 @@ function WebGLTrail({ trail, background }: { trail: number; background: string }
     fx.fresh = true;
   }, [fx, active]);
 
-  useFrame((_, dt) => {
+  const draw = (dt: number) => {
     if (!active) {
       gl.autoClear = true;
       gl.setRenderTarget(null);
@@ -528,7 +546,69 @@ function WebGLTrail({ trail, background }: { trail: number; background: string }
     gl.render(scene, camera);
     gl.setRenderTarget(null);
     gl.render(fx.blitScene, fx.cam);
-  }, 1);
+  };
+  useFrame((_, dt) => draw(dt), 1);
+  useEffect(() => {
+    drawRef.current = draw;
+  });
+  return null;
+}
+
+/** Local-time stamp for the snapshot filename: grok-bots-YYYYMMDD-HHMMSS.png */
+function snapshotName(d = new Date()) {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `grok-bots-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+}
+
+/**
+ * Snapshot: the render canvas alone — bots, background, trails and blur as
+ * drawn, at its native pixel size — as a PNG. The HUD, renderer label and
+ * Leva panel are DOM, not canvas, so they are never in it. The Canvas 2D
+ * bitmap persists between frames; WebGL's drawing buffer does not, so a
+ * frame is drawn right before reading it (no preserveDrawingBuffer needed).
+ */
+function Snapshot({
+  captureRef,
+  drawRef,
+  openInTab,
+}: {
+  captureRef: React.RefObject<(() => void) | null>;
+  drawRef: React.RefObject<((dt: number) => void) | null>;
+  openInTab: boolean;
+}) {
+  const { gl, scene, camera } = useThree();
+  useEffect(() => {
+    captureRef.current = () => {
+      const canvas = gl.domElement;
+      if (!(gl as unknown as Canvas2DRenderer).isCanvas2DRenderer) {
+        if (drawRef.current) drawRef.current(0);
+        else gl.render(scene, camera);
+      }
+      const name = snapshotName();
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const w = window as unknown as { __grokLastSnapshot?: { name: string; size: number; width: number; height: number } };
+        w.__grokLastSnapshot = { name, size: blob.size, width: canvas.width, height: canvas.height };
+        // Some embedded browsers (Electron without a download handler) drop
+        // anchor downloads silently; the "snapshot in tab" toggle shows the
+        // PNG in a new tab instead, to save from there.
+        if (openInTab || !("download" in HTMLAnchorElement.prototype)) {
+          window.open(url, "_blank");
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          return;
+        }
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      }, "image/png");
+    };
+  }, [gl, scene, camera, captureRef, drawRef, openInTab]);
   return null;
 }
 
@@ -548,6 +628,8 @@ export function Scene() {
   const renderer = useMemo(() => pickRenderer(webgl.ok), [webgl.ok]);
   const rapier = useRapierReady();
   const globalError = useGlobalErrors();
+  const captureRef = useRef<(() => void) | null>(null);
+  const drawRef = useRef<((dt: number) => void) | null>(null);
 
   const settings = useControls({
     // First in the panel so it is visible without expanding anything.
@@ -563,6 +645,8 @@ export function Scene() {
     botScale: { value: 1, min: 0.5, max: 2, step: 0.05, label: "bot scale" },
     faceCamera: { value: false, label: "face camera" },
     Respawn: button(() => setGeneration((g) => g + 1)),
+    Snapshot: button(() => captureRef.current?.()),
+    snapshotTab: { value: false, label: "snapshot in tab" },
   });
 
   // Paint the page the same colour as the canvas so the two never mismatch
@@ -590,10 +674,11 @@ export function Scene() {
       >
         <Stage background={background} manualClear={renderer === "webgl" && settings.trail > 0} />
         {renderer === "webgl" ? (
-          <WebGLTrail trail={settings.trail} background={background} />
+          <WebGLTrail trail={settings.trail} background={background} drawRef={drawRef} />
         ) : (
           <Canvas2DEffects trail={settings.trail} blur={settings.blur} />
         )}
+        <Snapshot captureRef={captureRef} drawRef={drawRef} openInTab={settings.snapshotTab} />
         {rapier.ready && (
           <World
             settings={settings}
