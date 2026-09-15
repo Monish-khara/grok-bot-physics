@@ -13,6 +13,76 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `racetrack` — the cloud racetrack
+
+Branched from `sphere`. The Sphere, its colours and the transparent Snapshot
+stay; the Drop/Fly physics goes. One big green cloud sits at the centre, two
+thin green strokes run around it at a constant distance from its silhouette
+— a real *Offset Path*, not a scaled copy — and the other nine bots race
+around the lane between them. Live at
+<https://monish-khara.github.io/grok-bot-physics/racetrack/>.
+
+![The cloud racetrack: offset-path strokes and nine racers, WebGL renderer](docs/screenshot-racetrack.png)
+
+- **Offset paths** (`src/racetrack.ts`): scaling an outline moves its convex
+  parts too far and its concave parts too little, which is what looked wrong.
+  An offset curve at distance *d* is instead the iso-line `sdf(x, y) = d` of
+  the shape's signed distance function, and the cloud already has one:
+  `src/geometry.ts` builds each body from an SDF, and `botSilhouette()` now
+  exposes the exact 2D distance to its front outline (the loft's drawn ring,
+  ungridded). The track is extracted from it by **marching squares** on a
+  224² grid of the field (sampled once), chained into loops (the longest is
+  the offset), **Newton-snapped** onto the exact iso-line, run through a
+  closed centripetal **Catmull-Rom** and resampled to 320 points by arc
+  length, then snapped again. Convex corners come out as circular arcs of
+  radius *d*; where two bumps' offsets meet in a notch there is a crease,
+  exactly as in Illustrator. The inner stroke is at `d1`, the outer at
+  `d1 + width`, and the racers' centreline at `d1 + width / 2`, all from the
+  same field, so slider changes recompute in a few milliseconds. (A distance
+  transform of the rendered silhouette was the planned fallback; it was not
+  needed.) Headless check: 200 samples per stroke are within **0.00%** of
+  the target distance to the cloud polygon, measured independently.
+- **Rendering:** Canvas 2D strokes the two polylines (`stage.strokes`, round
+  joins, world-unit width) right after the interior fill, so they sit
+  behind the racers; WebGL builds flat ribbon meshes from the same points
+  at `z = -1.5`. Both go through the existing trail/blur and Snapshot paths.
+- **Cloud:** 40% of the Sphere's width, centred in the shape's bounding box,
+  face to the camera, colour `#2ecc5c` (`cloud colour`). Drag turns it like
+  a tile (`drag spin` °/px); a tap gives it a damped squash-and-stretch
+  wobble. The track never moves.
+- **Racers** (`src/Figure.tsx`, no physics bodies): the nine non-cloud bots
+  at 12% of the cloud's width, token colours, eyes on. Each has an arc-length
+  phase `s` on the centreline advanced by `race speed × (1 ± variance)` (a
+  fixed per-racer factor, so they overtake), an even starting spread, a
+  small bob, a lean into the direction of travel and a slight yaw toward it
+  so the eyes still read. A tap gives a 1.6 s boost (up to 2.4×).
+- **Leva:** `cloud colour`, `sphere`, `outside`, `track offset` (d1),
+  `track width`, `stroke width` (all as fractions of the cloud's width),
+  `stroke colour`, `racers` (0–9), `race speed` (world units/s),
+  `speed variance`, `direction`, `trail`, `blur`, `drag spin`, `Respawn`
+  (re-spreads the field, re-rolls colours and speed factors), `Snapshot`,
+  `snapshot in tab`. `?trail=&blur=` presets still work.
+- **Test hooks:** `window.__grokTrack()` (both strokes, the centreline, the
+  cloud outline, all in world units, plus `d1`, `d2`, sizes),
+  `window.__grokRacers()` (`s`, speed factor, boost), `__grokBotPositions()`
+  (racers), `__grokBotBounds()` (the Sphere). Verified headless with WebGL
+  disabled and with SwiftShader WebGL: strokes within 2% (measured 0.00%) of
+  `d1`/`d2`, nine racers present and inside the lane band and the Sphere for
+  60 s, taps boost, no console errors.
+- **Run alongside the other branches:** worktree
+  `~/repos/grok-bot-physics-racetrack`, port `4735`:
+
+  ```bash
+  cd ~/repos/grok-bot-physics-racetrack
+  npm install
+  npm run dev -- --port 4735 --strictPort
+  # → http://127.0.0.1:4735/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-racetrack bash -lc 'cd ~/repos/grok-bot-physics-racetrack && npm run dev -- --port 4735 --strictPort 2>&1 | tee /tmp/grok-bot-physics-racetrack.log'`.
+- Rapier is no longer used on this branch (the dependency is still in
+  `package.json`; nothing imports it).
+
 ## This branch: `sphere` — the bots inside the Sphere
 
 Branched from `fly`. The rectangular box is replaced by the silhouette of the
