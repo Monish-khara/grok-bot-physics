@@ -11,7 +11,7 @@ export default function App() {
       </SceneErrorBoundary>
       <header className="hud">
         <h1>Grok Bots · Russian Doll</h1>
-        <p>The dome peels off layer by layer, then stacks back up. Tap it to peel the next layer now.</p>
+        <p>Hollow shells, one inside the next. Each turns to show its window and the shell behind it, then they close again. Tap to turn the next one now.</p>
       </header>
       <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Nesting" }} />
     </div>

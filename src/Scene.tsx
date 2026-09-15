@@ -4,6 +4,7 @@ import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber"
 import { button, useControls } from "leva";
 import { getBotGeometries, type BotGeometry, type Quality } from "./geometry";
 import { Figure } from "./Figure";
+import { buildShellBot } from "./shell";
 import { Canvas2DRenderer } from "./canvas2d";
 import { BOT_HUES, TOKENS, type TokenName } from "./data/tokens";
 import { StatusOverlay, detectWebGL, useGlobalErrors } from "./Status";
@@ -276,39 +277,34 @@ function Snapshot({
 
 // ── Nesting ─────────────────────────────────────────────────────────────────
 
+type Align = "centre" | "floor";
+
 type NestSettings = {
-  /** Number of layers, 2..10. */
+  /** Number of layers, 2..10; the last is the solid core. */
   layers: number;
   /** Scale of each layer relative to the one outside it. */
   shrink: number;
-  /** Seconds a layer is shown before it peels. */
+  /** Shell wall, as a fraction of that shell's outer radius. */
+  thickness: number;
+  /** Seconds a state is held before the next shell turns. */
   interval: number;
-  /** Seconds a peel (or a return) takes. */
-  peel: number;
-  /** Turns about the vertical axis over one peel. */
-  spinTurns: number;
+  /** Seconds one 180° turn takes. */
+  turn: number;
+  /** Stack pitched toward the camera, degrees, so rims show. */
+  tilt: number;
+  /** Shells share the dome's sphere centre, or each stands on the Sphere floor. */
+  align: Align;
   /** Layer 0's width as a fraction of the Sphere's; 1 fills it. */
   botScale: number;
   play: boolean;
 };
 
-/** "peel": layers come off one by one; "rebuild": they fly back in reverse order. */
-type Mode = "peel" | "rebuild";
+/** "open": shells turn away one by one from the outside in; "close": they turn back from the inside out. */
+type Mode = "open" | "close";
 type NestState = { layer: number; mode: Mode; t: number };
 
-/** Pause between two returning layers while rebuilding, seconds. */
-const REBUILD_GAP = 0.35;
-/** Peel travel, as fractions of layer 0's radius. */
-const SLIDE = 0.75;
-const LIFT = 0.4;
-/** Peeled layer shrinks to this by the end. */
-const PEEL_SCALE = 0.85;
-/** Lean into the slide, radians at the end. */
-const LEAN = 0.22;
-/** Eased progress at which the peeled layer starts to fade. */
-const FADE_FROM = 0.4;
-/** The moving layer sits a little in front so the Canvas 2D painter's sort is never a tie. */
-const MOVER_Z = 0.5;
+/** Pause between two shells turning back while closing, seconds. */
+const CLOSE_GAP = 0.4;
 /** Pointer travel (px) below which a press counts as a tap. */
 const TAP_SLOP = 6;
 
@@ -320,80 +316,90 @@ function layerColor(i: number): string {
   return TOKENS[BOT_HUES[(start + i) % BOT_HUES.length]];
 }
 
-/** What is on screen this frame: the static layer and, during a peel or return, the moving one. */
-type Visible = { base: number; mover: number | null; progress: number };
-
-function visibleLayers(s: NestState, n: number, settings: NestSettings): Visible {
-  if (s.mode === "peel") {
-    if (s.layer >= n - 1 || s.t < settings.interval) return { base: s.layer, mover: null, progress: 0 };
-    return { base: s.layer + 1, mover: s.layer, progress: Math.min(1, (s.t - settings.interval) / settings.peel) };
+/**
+ * Turn of every layer this frame, 0..1 (× 180°). Shells 0..n−2 turn; the core
+ * (n−1) never does. Opening: shells before `layer` are turned, `layer` is
+ * turning once its hold is over. Closing: shells after `layer` are back,
+ * `layer` is turning back after a short gap, shells before it are still open.
+ */
+function turns(s: NestState, n: number, settings: NestSettings): number[] {
+  const out = new Array<number>(n).fill(0);
+  if (s.mode === "open") {
+    for (let i = 0; i < Math.min(s.layer, n - 1); i++) out[i] = 1;
+    if (s.layer < n - 1 && s.t > settings.interval) out[s.layer] = easeInOut(Math.min(1, (s.t - settings.interval) / settings.turn));
+  } else {
+    for (let i = 0; i < s.layer; i++) out[i] = 1;
+    if (s.layer >= 0 && s.layer < n - 1) out[s.layer] = s.t > CLOSE_GAP ? 1 - easeInOut(Math.min(1, (s.t - CLOSE_GAP) / settings.turn)) : 1;
   }
-  if (s.t < REBUILD_GAP || s.layer <= 0) return { base: s.layer, mover: null, progress: 0 };
-  return { base: s.layer, mover: s.layer - 1, progress: 1 - Math.min(1, (s.t - REBUILD_GAP) / settings.peel) };
+  return out;
 }
 
 /** Advance the timeline by `dt` seconds. */
 function step(s: NestState, dt: number, n: number, settings: NestSettings) {
   s.t += dt;
-  if (s.mode === "peel") {
+  if (s.mode === "open") {
     if (s.layer >= n - 1) {
-      // Smallest layer showing: hold, then start putting them back.
+      // Fully open (only the core still faces us): hold, then close from the inside out.
       if (s.t >= settings.interval) {
-        s.mode = "rebuild";
+        s.mode = "close";
+        s.layer = n - 2;
         s.t = 0;
       }
-    } else if (s.t >= settings.interval + settings.peel) {
+    } else if (s.t >= settings.interval + settings.turn) {
       s.layer++;
       s.t = 0;
     }
-  } else if (s.layer <= 0) {
-    s.mode = "peel";
-    s.t = 0;
-  } else if (s.t >= REBUILD_GAP + settings.peel) {
+  } else if (s.t >= CLOSE_GAP + settings.turn) {
     s.layer--;
     s.t = 0;
-    if (s.layer === 0) s.mode = "peel";
+    if (s.layer < 0) {
+      s.mode = "open";
+      s.layer = 0;
+    }
   }
 }
 
 /**
- * The stack: layer 0 is the dome scaled to the Sphere (its base on the
- * Sphere's floor, its silhouette the Sphere's own), every layer inside it is
- * the same dome scaled by `shrink` about the base centre. Only two figures
- * exist — the layer on show and the one moving — since inner layers are
- * hidden anyway and coincident bodies would tie the Canvas 2D depth sort.
- * The peel: spin about the vertical axis, lift and slide to the side, shrink
- * a little, fade out; a return is the same path backwards.
+ * The stack: layer 0 is the shell scaled to the Sphere (its silhouette the
+ * Sphere's own), every layer inside it is the same shell scaled by `shrink`;
+ * the last layer is the solid dome. All are drawn — you look into them —
+ * either sharing the dome's sphere centre or each standing on the Sphere's
+ * floor, the whole stack pitched by `tilt`. Each shell turns 180° about its
+ * own vertical axis in the cascade, bringing its window round to the camera.
  */
 function Nesting({
   dome,
   sphere,
   settings,
   generation,
+  quality,
   stateRef,
 }: {
   dome: BotGeometry;
   sphere: Sphere;
   settings: NestSettings;
   generation: number;
+  quality: Quality;
   stateRef: React.RefObject<NestState>;
 }) {
   const n = Math.max(2, Math.round(settings.layers));
-  const baseGroup = useRef<THREE.Group | null>(null);
-  const moverGroup = useRef<THREE.Group | null>(null);
-  const baseFade = useRef(1);
-  const moverFade = useRef(1);
-  const [shown, setShown] = useState<{ base: number; mover: number | null }>({ base: 0, mover: null });
-  const euler = useMemo(() => new THREE.Euler(), []);
+  const groups = useRef<(THREE.Group | null)[]>([]);
+  const stack = useRef<THREE.Group | null>(null);
   const still = useMemo(() => new THREE.Vector3(), []);
+  const colors = useMemo(() => Array.from({ length: n }, (_, i) => layerColor(i)), [n]);
 
-  // Restart (button or layer-count change) puts layer 0 back on show.
+  // One shell geometry per colour (tones are baked as vertex colours); the core reuses the solid dome.
+  const shells = useMemo(
+    () => colors.slice(0, n - 1).map((c) => buildShellBot(dome, settings.thickness, c, quality)),
+    [dome, settings.thickness, colors, n, quality],
+  );
+  useEffect(() => () => shells.forEach((s) => s.geometry.dispose()), [shells]);
+
+  // Restart (button or layer-count change) closes everything.
   const resetFor = useRef<string | null>(null);
 
   /** World radius of layer `i`. */
   const radius = (i: number) => settings.botScale * sphere.r * Math.pow(settings.shrink, i);
-  /** Mesh scale for a layer of world radius `r`: the dome geometry's radius is `dome.halfExtents.x`. */
-  const meshScale = (r: number) => r / dome.halfExtents.x;
 
   useFrame((_, rawDt) => {
     const s = stateRef.current;
@@ -401,48 +407,31 @@ function Nesting({
     if (resetFor.current !== key) {
       resetFor.current = key;
       s.layer = 0;
-      s.mode = "peel";
+      s.mode = "open";
       s.t = 0;
     }
     if (settings.play) step(s, Math.min(rawDt, 0.1), n, settings);
-    const v = visibleLayers(s, n, settings);
-    if (v.base !== shown.base || v.mover !== shown.mover) setShown({ base: v.base, mover: v.mover });
+    const turn = turns(s, n, settings);
 
-    const base = baseGroup.current;
-    if (base) {
-      const r = radius(v.base);
-      base.position.set(sphere.cx, sphere.chordY - CHORD * r, 0);
-      base.quaternion.identity();
-      base.scale.setScalar(meshScale(r));
-      base.visible = true;
+    // The stack pivots about layer 0's sphere centre, which sits so layer 0's base is on the floor.
+    const r0 = radius(0);
+    const st = stack.current;
+    if (st) {
+      st.position.set(sphere.cx, sphere.chordY - CHORD * r0, 0);
+      st.rotation.set((settings.tilt * Math.PI) / 180, 0, 0);
     }
-    baseFade.current = 1;
-
-    const mover = moverGroup.current;
-    if (mover) {
-      if (v.mover === null) {
-        mover.visible = false;
-        moverFade.current = 0;
-      } else {
-        const e = easeInOut(v.progress);
-        const r0 = radius(0);
-        const r = radius(v.mover) * (1 - (1 - PEEL_SCALE) * e);
-        // Alternate sides so successive layers do not all leave the same way.
-        const dir = v.mover % 2 === 0 ? 1 : -1;
-        mover.visible = true;
-        mover.position.set(sphere.cx + dir * SLIDE * r0 * e, sphere.chordY - CHORD * r + LIFT * r0 * e, MOVER_Z);
-        euler.set(0, settings.spinTurns * Math.PI * 2 * e, -dir * LEAN * e, "ZYX");
-        mover.quaternion.setFromEuler(euler);
-        mover.scale.setScalar(meshScale(r));
-        // Solid while it starts to turn and lift (the layer under it must not
-        // show through yet), then fades out over the rest of the flight.
-        const f = Math.max(0, Math.min(1, (e - FADE_FROM) / (1 - FADE_FROM)));
-        moverFade.current = 1 - f * f * (3 - 2 * f);
-      }
+    for (let i = 0; i < n; i++) {
+      const g = groups.current[i];
+      if (!g) continue;
+      const r = radius(i);
+      const y = settings.align === "centre" ? 0 : CHORD * (r0 - r);
+      g.position.set(0, y, 0);
+      g.rotation.set(0, Math.PI * turn[i], 0);
+      g.scale.setScalar(r / dome.halfExtents.x);
     }
   });
 
-  // Tap: peel the layer on show now (skip the rest of its hold).
+  // Tap: end the current hold now so the next shell turns.
   const press = useRef<{ x: number; y: number } | null>(null);
   const onDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
@@ -453,39 +442,30 @@ function Nesting({
     press.current = null;
     if (!p || Math.hypot(e.clientX - p.x, e.clientY - p.y) > TAP_SLOP) return;
     const s = stateRef.current;
-    if (s.mode === "peel" && s.t < settings.interval) s.t = settings.interval;
+    if (s.mode === "open" && s.t < settings.interval) s.t = settings.interval;
+    else if (s.mode === "close" && s.t < CLOSE_GAP) s.t = CLOSE_GAP;
   };
 
   return (
-    <>
-      <Figure
-        key={`base-${shown.base}`}
-        ref={baseGroup}
-        bot={dome}
-        color={layerColor(shown.base)}
-        scale={1}
-        blur={0}
-        velocity={still}
-        fade={baseFade}
-        onPointerDown={onDown}
-        onPointerUp={onUp}
-      />
-      {shown.mover !== null && (
+    <group ref={stack}>
+      {colors.map((c, i) => (
         <Figure
-          key={`mover-${shown.mover}`}
-          ref={moverGroup}
-          bot={dome}
-          color={layerColor(shown.mover)}
+          key={i < n - 1 ? `shell-${i}` : `core-${i}`}
+          ref={(g) => {
+            groups.current[i] = g;
+          }}
+          bot={i < n - 1 ? shells[i] : dome}
+          color={c}
           scale={1}
           blur={0}
           velocity={still}
-          fade={moverFade}
-          overlay
+          vertexColors={i < n - 1}
+          perTriangle={i < n - 1}
           onPointerDown={onDown}
           onPointerUp={onUp}
         />
-      )}
-    </>
+      ))}
+    </group>
   );
 }
 
@@ -525,7 +505,7 @@ function Framed({
   const quality: Quality = renderer === "canvas2d" ? "low" : "high";
   const bots = useMemo(() => getBotGeometries(quality), [quality]);
   const dome = useMemo(() => bots.find((b) => b.shape.id === "dome")!, [bots]);
-  const state = useRef<NestState>({ layer: 0, mode: "peel", t: 0 });
+  const state = useRef<NestState>({ layer: 0, mode: "open", t: 0 });
   const scene = useThree((s) => s.scene);
 
   useEffect(() => {
@@ -534,7 +514,7 @@ function Framed({
       __grokBotsReady?: boolean;
       __grokBotBounds?: () => Sphere;
       __grokScene?: () => THREE.Scene;
-      __grokNesting?: () => NestState & { layers: number } & Visible & { radius: number[] };
+      __grokNesting?: () => NestState & { layers: number; turns: number[]; radius: number[] };
       __grokNestingSet?: (s: Partial<NestState>) => void;
     };
     w.__grokBotsReady = true;
@@ -546,7 +526,7 @@ function Framed({
       return {
         ...s,
         layers: n,
-        ...visibleLayers(s, n, settings),
+        turns: turns(s, n, settings),
         radius: Array.from({ length: n }, (_, i) => settings.botScale * sphere.r * Math.pow(settings.shrink, i)),
       };
     };
@@ -562,7 +542,7 @@ function Framed({
       ) : (
         <Canvas2DStage sphere={sphere} inside={look.inside} outside={look.outside} />
       )}
-      <Nesting dome={dome} sphere={sphere} settings={settings} generation={generation} stateRef={state} />
+      <Nesting dome={dome} sphere={sphere} settings={settings} generation={generation} quality={quality} stateRef={state} />
     </>
   );
 }
@@ -578,9 +558,11 @@ export function Scene() {
   const controls = useControls({
     layers: { value: 6, min: 2, max: 10, step: 1 },
     shrink: { value: 0.82, min: 0.6, max: 0.95, step: 0.01 },
+    thickness: { value: 0.06, min: 0.02, max: 0.2, step: 0.005 },
     interval: { value: 2.5, min: 0.2, max: 10, step: 0.1, label: "interval (s)" },
-    peel: { value: 1.2, min: 0.2, max: 5, step: 0.1, label: "peel (s)" },
-    spinTurns: { value: 1.5, min: 0, max: 4, step: 0.25, label: "spin turns" },
+    turn: { value: 1.2, min: 0.2, max: 5, step: 0.1, label: "turn (s)" },
+    tilt: { value: 10, min: 0, max: 25, step: 1, label: "tilt (°)" },
+    align: { value: "centre" as Align, options: ["centre", "floor"] as Align[] },
     // `?play=0` starts paused (screenshots, headless checks).
     play: { value: QUERY.get("play") !== "0" },
     Restart: button(() => setGeneration((g) => g + 1)),
@@ -596,13 +578,25 @@ export function Scene() {
     () => ({
       layers: controls.layers,
       shrink: controls.shrink,
+      thickness: controls.thickness,
       interval: controls.interval,
-      peel: controls.peel,
-      spinTurns: controls.spinTurns,
+      turn: controls.turn,
+      tilt: controls.tilt,
+      align: controls.align as Align,
       botScale: controls.botScale,
       play: controls.play,
     }),
-    [controls.layers, controls.shrink, controls.interval, controls.peel, controls.spinTurns, controls.botScale, controls.play],
+    [
+      controls.layers,
+      controls.shrink,
+      controls.thickness,
+      controls.interval,
+      controls.turn,
+      controls.tilt,
+      controls.align,
+      controls.botScale,
+      controls.play,
+    ],
   );
 
   // Paint the page the outside colour so the canvas and page never mismatch,
