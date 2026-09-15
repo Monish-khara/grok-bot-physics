@@ -18,6 +18,9 @@ import * as THREE from "three";
  *   inlays, that is when — and only when — they would be visible.
  * - Per-body ordering is an approximation: two interpenetrating bodies would
  *   overlap wrongly, but colliders keep them apart.
+ * - Bodies tagged `userData.perTriangle` (hollow shells you look into) are
+ *   instead painted triangle by triangle in one global depth sort with
+ *   back-face culling and per-triangle colours; see `paintTriangles`.
  *
  * Effects (`effects.trail`, `effects.blur`, both 0–1, 0 = off):
  * - Trail: each body's silhouette path is snapshotted as it moves and the
@@ -110,6 +113,8 @@ export class Canvas2DRenderer {
   dispose() {
     this.projected.clear();
     this.adjacencyCache.clear();
+    this.viewXYZ.clear();
+    this.triColorCache.clear();
   }
 
   private applySize() {
@@ -280,8 +285,15 @@ export class Canvas2DRenderer {
     this.ghostFills = 0;
 
     // Build every body's paths first so trails can be laid down underneath all of them.
+    // Bodies flagged `perTriangle` (things you can see into) skip the
+    // silhouette and go through the global triangle sort below instead.
     const frame: BodyFrame[] = [];
-    for (const { mesh } of this.bodies) {
+    const perTriangle: THREE.Mesh[] = [];
+    for (const { mesh, depth } of this.bodies) {
+      if (mesh.userData.perTriangle) {
+        perTriangle.push(mesh);
+        continue;
+      }
       const bodyPath = this.buildPath(mesh);
       if (!bodyPath) continue;
       const eyes: { path: Path2D; color: string }[] = [];
@@ -299,31 +311,14 @@ export class Canvas2DRenderer {
         const eyePath = this.buildPath(eye);
         if (eyePath) eyes.push({ path: eyePath, color: colorOf(eye.material) });
       }
-      frame.push({ mesh, path: bodyPath, color: colorOf(mesh.material), alpha: alphaOf(mesh.material), eyes });
+      frame.push({ mesh, depth, path: bodyPath, color: colorOf(mesh.material), alpha: alphaOf(mesh.material), eyes });
     }
 
     if (live || transparent) this.drawTrails(ctx, frame, trail, now, live);
 
     const tf = performance.now();
-    for (const body of frame) {
-      if (blur > 0) this.drawBlur(ctx, body, blur);
-      // A translucent material (a fading body) fills at its opacity.
-      ctx.globalAlpha = body.alpha;
-      ctx.fillStyle = body.color;
-      ctx.fill(body.path, "nonzero");
-      // The pill is mostly buried in the body; clipping to the body's
-      // silhouette stands in for the depth test at grazing angles.
-      if (body.eyes.length) {
-        ctx.save();
-        ctx.clip(body.path, "nonzero");
-        for (const eye of body.eyes) {
-          ctx.fillStyle = eye.color;
-          ctx.fill(eye.path, "nonzero");
-        }
-        ctx.restore();
-      }
-      ctx.globalAlpha = 1;
-    }
+    if (perTriangle.length) this.paintTriangles(ctx, camera, frame, perTriangle, blur);
+    else for (const body of frame) this.paintBody(ctx, body, blur);
     this.phases.fill += performance.now() - tf;
     if (stage) ctx.restore();
     if (stagePath && transparent) {
@@ -339,6 +334,178 @@ export class Canvas2DRenderer {
     this.frames++;
     this.frameMs += (dt - this.frameMs) * 0.1;
   }
+
+  /** One silhouette body: optional blur, the fill at its opacity, then its eyes clipped to it. */
+  private paintBody(ctx: CanvasRenderingContext2D, body: BodyFrame, blur: number) {
+    if (blur > 0) this.drawBlur(ctx, body, blur);
+    // A translucent material (a fading body) fills at its opacity.
+    ctx.globalAlpha = body.alpha;
+    ctx.fillStyle = body.color;
+    ctx.fill(body.path, "nonzero");
+    // The pill is mostly buried in the body; clipping to the body's
+    // silhouette stands in for the depth test at grazing angles.
+    if (body.eyes.length) {
+      ctx.save();
+      ctx.clip(body.path, "nonzero");
+      for (const eye of body.eyes) {
+        ctx.fillStyle = eye.color;
+        ctx.fill(eye.path, "nonzero");
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Per-frame triangle list for the painter (screen xy per corner, view depth, colour).
+  private triXY: number[] = [];
+  private triDepth: number[] = [];
+  private triColor: string[] = [];
+  private triOrder: number[] = [];
+  private viewXYZ = new Map<THREE.BufferGeometry, Float32Array>();
+  private triColorCache = new Map<THREE.BufferGeometry, string[] | null>();
+
+  /**
+   * Painter's algorithm per triangle for bodies you can see into (the
+   * nesting shells): every front-facing triangle of every `perTriangle` body
+   * and of its camera-facing eyes goes into one list, sorted far to near by
+   * view depth, and is filled with its own colour — the geometry's vertex
+   * colour (one flat tone per triangle) or the material colour. Ordinary
+   * silhouette bodies are slotted into the same order at their centre depth,
+   * so a solid core inside the shells paints after their back walls and
+   * before their front walls. Runs of one colour are merged into a single
+   * path, so the fill count is a few hundred, not the triangle count.
+   */
+  private paintTriangles(ctx: CanvasRenderingContext2D, camera: THREE.Camera, bodies: BodyFrame[], meshes: THREE.Mesh[], blur: number) {
+    const xy = this.triXY, depth = this.triDepth, color = this.triColor;
+    xy.length = depth.length = color.length = 0;
+    for (const mesh of meshes) {
+      this.gatherTriangles(mesh, camera, 0);
+      for (const child of mesh.children) {
+        const eye = child as THREE.Mesh;
+        if (!eye.isMesh || !eye.visible || !isDrawable(eye.material)) continue;
+        const local = eye.userData.eyeNormal as THREE.Vector3 | undefined;
+        if (local) {
+          this.normalMatrix.getNormalMatrix(mesh.matrixWorld);
+          this.tmpN.copy(local).applyMatrix3(this.normalMatrix).normalize();
+          if (this.tmpN.dot(this.toCamera) < 0.15) continue;
+        }
+        // The pill's lip stands 0.025 body units proud of the face; a bias a
+        // little larger than that puts every eye triangle after the face
+        // triangles it sits in.
+        this.tmpV.setFromMatrixColumn(eye.matrixWorld, 0);
+        this.gatherTriangles(eye, camera, 0.06 * this.tmpV.length());
+      }
+    }
+    const n = depth.length;
+    const order = this.triOrder;
+    order.length = n;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) {
+      order[i] = i;
+      if (depth[i] < lo) lo = depth[i];
+      if (depth[i] > hi) hi = depth[i];
+    }
+    // Depth is quantised into thin slabs and ties broken by colour, so
+    // triangles of one surface that interleave in depth with an occluded
+    // surface behind it (the next shell's face) still paint as one run —
+    // hundreds of fills instead of thousands, and far fewer seams. A slab
+    // is well under the gap between two shells or a wall's thickness.
+    const slab = (hi - lo) / DEPTH_SLABS || 1;
+    const key = (i: number) => Math.floor((depth[i] - lo) / slab);
+    order.sort((a, b) => key(a) - key(b) || (color[a] < color[b] ? -1 : color[a] > color[b] ? 1 : 0) || depth[a] - depth[b]);
+    this.phases.triangles += n;
+
+    let bi = 0;
+    let path: Path2D | null = null;
+    let current = "";
+    const flush = () => {
+      if (path) {
+        ctx.fillStyle = current;
+        ctx.fill(path, "nonzero");
+        path = null;
+      }
+    };
+    for (let k = 0; k < n; k++) {
+      const i = order[k];
+      const d = depth[i];
+      while (bi < bodies.length && bodies[bi].depth <= d) {
+        flush();
+        current = "";
+        this.paintBody(ctx, bodies[bi++], blur);
+      }
+      if (!path || color[i] !== current) {
+        flush();
+        current = color[i];
+        path = new Path2D();
+      }
+      const j = i * 6;
+      path.moveTo(xy[j], xy[j + 1]);
+      path.lineTo(xy[j + 2], xy[j + 3]);
+      path.lineTo(xy[j + 4], xy[j + 5]);
+      path.closePath();
+    }
+    flush();
+    while (bi < bodies.length) this.paintBody(ctx, bodies[bi++], blur);
+  }
+
+  /** Project a mesh and append its front-facing triangles to the painter's list. */
+  private gatherTriangles(mesh: THREE.Mesh, camera: THREE.Camera, bias: number) {
+    const geometry = mesh.geometry;
+    const position = geometry.attributes.position as THREE.BufferAttribute | undefined;
+    if (!position) return;
+    const count = position.count;
+    let v = this.viewXYZ.get(geometry);
+    if (!v || v.length < count * 3) {
+      v = new Float32Array(count * 3);
+      this.viewXYZ.set(geometry, v);
+    }
+    const { width, height } = this;
+    this.mvp.multiplyMatrices(this.viewProj, mesh.matrixWorld);
+    const e = this.mvp.elements;
+    // View-space z for the depth: row 3 of view × world.
+    const mv = this.mvp2.multiplyMatrices(camera.matrixWorldInverse, mesh.matrixWorld).elements;
+    const src = position.array as ArrayLike<number>;
+    for (let i = 0, j = 0; i < count; i++, j += 3) {
+      const x = src[j], y = src[j + 1], z = src[j + 2];
+      const w = e[3] * x + e[7] * y + e[11] * z + e[15] || 1;
+      v[j] = ((e[0] * x + e[4] * y + e[8] * z + e[12]) / w + 1) * 0.5 * width;
+      v[j + 1] = (1 - (e[1] * x + e[5] * y + e[9] * z + e[13]) / w) * 0.5 * height;
+      v[j + 2] = mv[2] * x + mv[6] * y + mv[10] * z + mv[14];
+    }
+
+    let colors = this.triColorCache.get(geometry);
+    if (colors === undefined) {
+      colors = triangleColors(geometry);
+      this.triColorCache.set(geometry, colors);
+    }
+    const flat = colors ? "" : colorOf(mesh.material);
+    const index = geometry.getIndex();
+    const triCount = index ? index.count / 3 : count / 3;
+    const xy = this.triXY, depth = this.triDepth, color = this.triColor;
+    for (let t = 0; t < triCount; t++) {
+      const a = (index ? index.getX(t * 3) : t * 3) * 3;
+      const b = (index ? index.getX(t * 3 + 1) : t * 3 + 1) * 3;
+      const c = (index ? index.getX(t * 3 + 2) : t * 3 + 2) * 3;
+      const ax = v[a], ay = v[a + 1], bx = v[b], by = v[b + 1], cx = v[c], cy = v[c + 1];
+      // Screen y points down: a front-facing (CCW in NDC) triangle has negative area here.
+      if ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay) >= 0) continue;
+      // Grow each triangle half a pixel about its centroid: abutting fills
+      // from different runs would otherwise leave anti-aliased hairlines.
+      const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3;
+      const grow = (x: number, y: number, k: number) => {
+        const dx = x - mx, dy = y - my;
+        const len = Math.hypot(dx, dy) || 1;
+        xy.push(x + (dx / len) * DILATE_PX, y + (dy / len) * DILATE_PX);
+        return k;
+      };
+      grow(ax, ay, 0);
+      grow(bx, by, 1);
+      grow(cx, cy, 2);
+      depth.push((v[a + 2] + v[b + 2] + v[c + 2]) / 3 + bias);
+      color.push(colors ? colors[t] : flat);
+    }
+  }
+  private mvp2 = new THREE.Matrix4();
 
   /**
    * Fill the projection of a mesh's front-facing triangles as one path. Rather
@@ -648,9 +815,14 @@ const BLUR_MAX_COPIES = 8;
 const BLUR_STEP_PX = 8;
 /** Opacity of the blur copy nearest the body. */
 const BLUR_ALPHA = 0.5;
+/** Painter: depth slabs across the frame's depth range, and the per-triangle growth in CSS px. */
+const DEPTH_SLABS = 200;
+const DILATE_PX = 0.5;
 
 type BodyFrame = {
   mesh: THREE.Mesh;
+  /** View-space z of the body's origin (more negative is farther). */
+  depth: number;
   path: Path2D;
   color: string;
   /** Fill opacity, from a transparent material; 1 otherwise. */
@@ -681,6 +853,26 @@ function isDrawable(material: THREE.Material | THREE.Material[]): boolean {
   if (!m || m.visible === false) return false;
   if (m.transparent && m.opacity <= 0.01) return false;
   return "color" in m;
+}
+
+/**
+ * One CSS colour per triangle from a geometry's `color` attribute (the first
+ * corner's — the shells bake one tone per triangle), or null when the
+ * geometry has none. Built once per geometry.
+ */
+function triangleColors(geometry: THREE.BufferGeometry): string[] | null {
+  const attr = geometry.attributes.color as THREE.BufferAttribute | undefined;
+  if (!attr) return null;
+  const index = geometry.getIndex();
+  const triCount = index ? index.count / 3 : attr.count / 3;
+  const out = new Array<string>(triCount);
+  const c = new THREE.Color();
+  for (let t = 0; t < triCount; t++) {
+    const i = index ? index.getX(t * 3) : t * 3;
+    c.setRGB(attr.getX(i), attr.getY(i), attr.getZ(i));
+    out[t] = `#${c.getHexString()}`;
+  }
+  return out;
 }
 
 function alphaOf(material: THREE.Material | THREE.Material[]): number {
