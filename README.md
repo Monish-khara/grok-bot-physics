@@ -41,10 +41,54 @@ bounce off the frame edges like a screensaver.
   empty space gives every bot a new random heading and spin; drag-to-rotate
   and flick work as before, and a flick also sets the release heading.
 - **Leva panel:** `speed` (default 6 units/s), `spin` (default 1.5 rad/s,
-  also the cap), `gravity` (default 0), `bounce` (default 1), `impulse
-  strength`, `drag spin`, `bot scale`, `face camera`, `Respawn`. `friction`
-  and `face seeking` are gone: friction no longer matters, and the
-  face-seeking torque would oscillate forever with no damping.
+  also the cap), `gravity` (default 0), `bounce` (default 1), `trail`,
+  `blur`, `impulse strength`, `drag spin`, `bot scale`, `face camera`,
+  `Respawn`. `friction` and `face seeking` are gone: friction no longer
+  matters, and the face-seeking torque would oscillate forever with no damping.
+
+### Trails and speed blur
+
+![Trail 0.6 and blur 1 in the Canvas 2D renderer](docs/screenshot-fly-trails.png)
+
+Two effect sliders, both `0` (off) by default so the plain look is unchanged.
+`?trail=0.6&blur=1` in the URL presets them.
+
+- **`trail`** (0–1) — each bot leaves fading copies of itself in its own
+  colour along its path; the slider is persistence (up to 2 s at `1`).
+  - *Canvas 2D* (`src/canvas2d.ts`): the renderer snapshots each body's
+    silhouette `Path2D` as it moves (at most 24 alive per body, spaced in
+    time, skipped while a bot is parked) and refills them under the live
+    bodies, oldest and faintest first. The frame is still fully cleared to
+    the background every time, so there is none of the residue an alpha
+    fade-clear leaves (8-bit blending stalls a few levels short of the
+    background and never finishes), and a new background colour is exact
+    immediately. Ghosts are body-only (no eyes), which reads as a colour trail.
+  - *WebGL* (`WebGLTrail` in `src/Scene.tsx`): a real fade-clear. The scene
+    accumulates in a 32-bit float render target that is washed toward the
+    background with a translucent full-screen quad each frame (time-based, so
+    the fade rate is frame-rate independent), the bots are drawn on top, and
+    the target is blitted to the screen. Float accumulation converges all the
+    way to the background; a background change just fades in. Falls back to
+    an 8-bit target (with the usual faint residue) if `EXT_color_buffer_float`
+    is missing. Because it fades the whole frame, WebGL ghosts include the
+    eyes and look like a continuous smear rather than stamped copies.
+- **`blur`** (0–1) — speed blur: the body *and its eyes* are redrawn stepped
+  backwards along the velocity with decreasing alpha, then drawn solid on
+  top. Smear length is `speed × blur × 0.16 s` of travel, so faster bots
+  smear more and a held bot does not smear at all.
+  - *Canvas 2D*: up to 8 translated refills of the already-built body and eye
+    paths (one every ~8 px), using the world velocity the scene writes to
+    `mesh.userData.velocity`, projected to screen space.
+  - *WebGL*: six translucent ghost meshes per bot (`Bot.tsx`), posed each
+    frame behind the body along its velocity and nudged slightly farther from
+    the camera so the solid body wins the depth test. Many extra draws of the
+    full-resolution meshes; fine on a GPU, slow under software GL.
+- **Cost** (headless Chromium, software Canvas 2D, 1280×800, ten bots): the
+  renderer's own JS time stays at ~2.1–2.4 ms/frame with everything on; what
+  grows is rasterisation of the extra fills (≈360 per frame at `trail 1`,
+  `blur 1`): the frame rate held 120 → 72 fps at DPR 1 and 120 → 46 fps at
+  DPR 2 in that fully software setup. With GPU-accelerated canvas the fills
+  are much cheaper.
 - **Run alongside the other branches:** the worktree lives at
   `~/repos/grok-bot-physics-fly` and is served on port `4733`
   (`master` on 4731, `canvas2d` on 4732):
@@ -125,6 +169,8 @@ Opens on <http://127.0.0.1:4731/> (fixed port, see `vite.config.ts`).
   - `gravity` — downward acceleration, default 0. Above 0 the normaliser
     switches off and the bots fall and bounce.
   - `bounce` — collider restitution (1 = fully elastic).
+  - `trail` — persistence of the colour trail each bot leaves (0 = off).
+  - `blur` — speed blur along each bot's velocity (0 = off).
   - `impulse strength` — size of the tap shove.
   - `drag spin` — degrees of rotation per pixel of drag.
   - `bot scale` — 0.5×–2× size multiplier for every bot, applied live to the
@@ -196,9 +242,12 @@ Copied read-only from the Sand-Toolkit repo:
   collider built from a thinned copy of the mesh vertices, scaled with the
   `bot scale` setting (ball/box fallback if the hull fails), and handles tap,
   drag-to-rotate and flick.
-- `src/canvas2d.ts` (this branch) is the Canvas 2D fallback renderer described
-  above; `Scene.tsx` picks it when `detectWebGL()` fails or `?renderer=canvas2d`
-  is set, and hands the bots the lighter geometry set.
+- `src/canvas2d.ts` is the Canvas 2D fallback renderer described above, plus
+  the trail snapshots and velocity-smear copies; `Scene.tsx` picks it when
+  `detectWebGL()` fails or `?renderer=canvas2d` is set, hands the bots the
+  lighter geometry set, and passes the effect sliders to it. Under WebGL the
+  same sliders drive `WebGLTrail` (float-target fade-clear) and the ghost
+  meshes in `Bot.tsx`.
 - `src/Scene.tsx` sets up an orthographic camera looking down -Z, the six
   invisible walls at the viewport edges and a shallow front/back slab, the
   per-step speed normaliser, click handling and the Leva panel.
