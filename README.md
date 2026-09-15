@@ -13,6 +13,84 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `nesting` — Russian doll
+
+Branched from `racetrack` (head `badf622`). The Sphere, its colours and the
+transparent Snapshot stay; the track and the racers go. One dome bot fills
+the Sphere — its silhouette *is* the Sphere's — and every few seconds the
+outer layer spins, lifts, slides off to the side and fades, revealing the
+same dome smaller and in the next token colour underneath. After the
+smallest one, the layers fly back in reverse order and the loop restarts.
+Live at <https://monish-khara.github.io/grok-bot-physics/nesting/>.
+
+![Mid-peel: the blue outer dome sliding off, the violet layer beneath it](docs/screenshot-nesting.png)
+
+- **Dome body** (`src/data/bodies.ts`, `dome`): none of the ten toolkit
+  shapes is a dome, so this branch adds one — the unit sphere sliced flat at
+  `y = CHORD` (`-0.42`, the same cut as `src/sphereShape.ts`), built as a
+  surface of revolution from an analytic profile through the existing
+  `revolve` path (the refit closes the tip with a tangent sphere cap, which
+  for a circle is the circle). Scaled to the Sphere's radius with its base on
+  the Sphere's floor it fills the interior exactly: no gap at the base, no
+  grey rim. Eyes are white pills 0.6 R apart and 0.56 R up, as in the
+  reference; because the surface leans back ~40° there, the pills are
+  stretched to read at the reference's proportions from the front and use a
+  new `upright` eye-frame option so their height axis stays vertical on
+  screen instead of splaying with the surface's own up.
+- **Layers:** `layers` (2–10, default 6) copies of the dome. Layer 0 is
+  `bot scale × Sphere radius` (1 = fills it); layer *i* is scaled by
+  `shrink`ⁱ (default 0.82) about the base centre, so every layer stands on
+  the floor. Colours walk the core token ladder from blue (blue, violet,
+  magenta, brown, red, orange, yellow, green, cyan — nine hues, so neighbours
+  never match); eyes are white on every layer. Only two figures ever exist:
+  the layer on show and the one in flight. Inner layers are hidden anyway,
+  and coincident bodies would tie the Canvas 2D depth sort.
+- **Peel loop** (`Nesting` in `src/Scene.tsx`): hold `interval` s (2.5),
+  then peel over `peel` s (1.2, ease-in-out): `spin turns` (1.5) about the
+  vertical axis, slide 0.75 R₀ toward one side (alternating per layer) and
+  lift 0.4 R₀, shrink to 85%, lean 0.22 rad into the slide, and fade — solid
+  for the first 40% of the flight so the layer beneath never shows through
+  early, then a smoothstep to 0. The Sphere stage clips whatever leaves it.
+  After the smallest layer shows for `interval`, the layers come back in
+  reverse order along the same path (0.35 s between them) and the loop
+  restarts. **Tap the dome** to peel the layer on show now. Drag-to-rotate
+  is gone on this branch so the spin reads clearly.
+- **Drawing the layer in flight:** it shares a centre with the layer under
+  it, so it must always win. WebGL draws it in `Figure`'s new `overlay` mode:
+  transparent material, no depth test, `renderOrder` above the opaque body,
+  eyes culled by their surface normal (the body can no longer hide the far
+  pair). Canvas 2D already culls eyes by normal and painter-sorts by depth;
+  the flyer sits 0.5 units in front so the sort is never a tie, and
+  `canvas2d.ts` now fills a transparent material at its opacity
+  (`globalAlpha`). `Figure` takes the opacity as a ref (`fade`) read every
+  frame, so the animation never re-renders React.
+- **Leva:** `layers`, `shrink`, `interval (s)`, `peel (s)`, `spin turns`,
+  `play`, `Restart`, `bot scale`, `sphere`, `outside`, `Snapshot`,
+  `snapshot in tab`. `?play=0` starts paused; `?renderer=canvas2d` forces the
+  fallback.
+- **Test hooks:** `window.__grokNesting()` (mode, layer, time in step, which
+  layers are drawn and the flight progress, every layer's radius),
+  `__grokNestingSet({ layer, mode, t })` to jump the timeline,
+  `__grokBotBounds()` (the Sphere), `__grokScene()`. Verified headless at
+  1200×900 with SwiftShader WebGL and with the Canvas 2D renderer: `npm run
+  build` and `tsc --noEmit` clean; the full dome fills the Sphere with eyes
+  visible and no gap at the base; mid-peel shows exactly two layers with the
+  outer drawn over the inner; the smallest layer sits on the floor; a 40 s
+  live run walks peel 0→5, rebuild 5→0 and restarts; a tap during a hold
+  jumps to the peel; no console errors.
+- **Run alongside the other branches:** worktree
+  `~/repos/grok-bot-physics-nesting`, port `4736`:
+
+  ```bash
+  cd ~/repos/grok-bot-physics-nesting
+  npm install
+  npm run dev -- --port 4736 --strictPort
+  # → http://127.0.0.1:4736/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-nesting bash -lc 'cd ~/repos/grok-bot-physics-nesting && npm run dev -- --port 4736 --strictPort 2>&1 | tee /tmp/grok-bot-physics-nesting.log'`.
+- Rapier is still unused here (the dependency remains in `package.json`).
+
 ## This branch: `racetrack` — the cloud racetrack
 
 Branched from `sphere`. The Sphere, its colours and the transparent Snapshot
