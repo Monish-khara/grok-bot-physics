@@ -16,13 +16,13 @@ Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 ## This branch: `racetrack` — the cloud racetrack
 
 Branched from `sphere`. The Sphere, its colours and the transparent Snapshot
-stay; the Drop/Fly physics goes. One big green cloud sits at the centre, two
-thin green strokes run around it at a constant distance from its silhouette
-— a real *Offset Path*, not a scaled copy — and the other nine bots race
-around the lane between them. Live at
-<https://monish-khara.github.io/grok-bot-physics/racetrack/>.
+stay; the Drop/Fly physics goes. One big green cloud breathes at the centre,
+two thin green rails run close around it at a constant distance from its
+silhouette — a real *Offset Path*, not a scaled copy — and the other nine
+bots race along the rails, half on the inner one and half on the outer. Live
+at <https://monish-khara.github.io/grok-bot-physics/racetrack/>.
 
-![The cloud racetrack: offset-path strokes and nine racers, WebGL renderer](docs/screenshot-racetrack.png)
+![The cloud racetrack: breathing cloud, tight double rail, nine racers riding the rails, WebGL renderer](docs/screenshot-racetrack.png)
 
 - **Offset paths** (`src/racetrack.ts`): scaling an outline moves its convex
   parts too far and its concave parts too little, which is what looked wrong.
@@ -41,34 +41,61 @@ around the lane between them. Live at
   same field, so slider changes recompute in a few milliseconds. (A distance
   transform of the rendered silhouette was the planned fallback; it was not
   needed.) Headless check: 200 samples per stroke are within **0.00%** of
-  the target distance to the cloud polygon, measured independently.
+  the target distance to the cloud polygon, measured independently. The
+  field is the cloud's **rest pose**: breathing, wobble and drag change only
+  the cloud's transform, never the SDF, so the rails hold still while the
+  cloud moves inside them.
+- **Tight double rail:** defaults `track offset` 0.16, `track width` 0.035,
+  `stroke width` 0.012 (fractions of the cloud's width), so the two rails
+  read as one close parallel pair with a gap about three strokes wide.
 - **Rendering:** Canvas 2D strokes the two polylines (`stage.strokes`, round
   joins, world-unit width) right after the interior fill, so they sit
   behind the racers; WebGL builds flat ribbon meshes from the same points
-  at `z = -1.5`. Both go through the existing trail/blur and Snapshot paths.
+  at `z = -1.5` with an explicit draw order — the Sphere fill is the render
+  target's clear colour (under everything by construction), the rail
+  ribbons draw first (`renderOrder −10`, no depth write), the cloud and
+  racers after (`renderOrder 0`), so a racer always paints over a rail
+  whatever its depth extent. Both go through the existing trail/blur and
+  Snapshot paths.
 - **Cloud:** 40% of the Sphere's width, centred in the shape's bounding box,
-  face to the camera, colour `#2ecc5c` (`cloud colour`). Drag turns it like
-  a tile (`drag spin` °/px); a tap gives it a damped squash-and-stretch
-  wobble. The track never moves.
+  face to the camera, colour `#2ecc5c` (`cloud colour`). It **breathes**: a
+  3.6 s looping squash-and-stretch with x and y in anti-phase (±6% at
+  `breathe` 1, default 0.5, a second harmonic so the inhale peaks sharper)
+  and a gentle bob (±1.2% of its width), plus periodic **blinks** — the eye
+  pills shut to 8% of their height and reopen over 0.16 s, every 2.2–5.2 s,
+  each scaled about its own centre (`blink` toggle, default on). Drag turns
+  it like a tile (`drag spin` °/px) and a tap gives it a damped
+  squash-and-stretch wobble; both layer on top of the breath (the wobble
+  multiplies the breath's scale, the drag pose composes with the wobble's
+  roll) rather than fighting it. The track never moves.
 - **Racers** (`src/Figure.tsx`, no physics bodies): the nine non-cloud bots
-  at 12% of the cloud's width, token colours, eyes on. Each has an arc-length
-  phase `s` on the centreline advanced by `race speed × (1 ± variance)` (a
-  fixed per-racer factor, so they overtake), an even starting spread, a
-  small bob, a lean into the direction of travel and a slight yaw toward it
-  so the eyes still read. A tap gives a 1.6 s boost (up to 2.4×).
-- **Leva:** `cloud colour`, `sphere`, `outside`, `track offset` (d1),
-  `track width`, `stroke width` (all as fractions of the cloud's width),
-  `stroke colour`, `racers` (0–9), `race speed` (world units/s),
-  `speed variance`, `direction`, `trail`, `blur`, `drag spin`, `Respawn`
-  (re-spreads the field, re-rolls colours and speed factors), `Snapshot`,
-  `snapshot in tab`. `?trail=&blur=` presets still work.
+  at `racer size` (default 12%) of the cloud's width, token colours, eyes
+  on. They ride **centred on the rails**: even-numbered racers on the inner
+  rail, odd on the outer, evenly spread along each with the outer field
+  staggered by half a gap. Each has an arc-length phase `s` on its rail
+  advanced by `race speed × (1 ± variance)` (a fixed per-racer factor, so
+  they overtake), a slight bob (4% of the racer), a lean into the direction
+  of travel and a slight yaw toward it so the eyes still read. A tap gives
+  a 1.6 s boost (up to 2.4×).
+- **Leva:** `cloud colour`, `sphere`, `outside`, `breathe` (0–1), `blink`,
+  `track offset` (d1), `track width`, `stroke width` (all as fractions of
+  the cloud's width), `stroke colour`, `racers` (0–9), `racer size`, `race
+  speed` (world units/s), `speed variance`, `direction`, `trail`, `blur`,
+  `drag spin`, `Respawn` (re-spreads the field, re-rolls colours and speed
+  factors), `Snapshot`, `snapshot in tab`. `?trail=&blur=&breathe=` and
+  `?blink=0` preset them.
 - **Test hooks:** `window.__grokTrack()` (both strokes, the centreline, the
   cloud outline, all in world units, plus `d1`, `d2`, sizes),
-  `window.__grokRacers()` (`s`, speed factor, boost), `__grokBotPositions()`
-  (racers), `__grokBotBounds()` (the Sphere). Verified headless with WebGL
-  disabled and with SwiftShader WebGL: strokes within 2% (measured 0.00%) of
-  `d1`/`d2`, nine racers present and inside the lane band and the Sphere for
-  60 s, taps boost, no console errors.
+  `window.__grokRacers()` (`rail`, `s`, speed factor, boost),
+  `__grokBotPositions()` (racers), `__grokBotBounds()` (the Sphere),
+  `__grokCloud()` (live breath scale `sx`/`sy`, `bob`, eye `lid`).
+  Verified headless (1200×900, Chromium) with the Canvas 2D renderer and
+  with SwiftShader WebGL: `npm run build` and `tsc --noEmit` clean, no
+  console errors, five racers on the inner rail and four on the outer, each
+  within 0.024 world units of its rail's centreline (the stroke is 0.06
+  wide), breath `sx`/`sy` in `[0.973, 1.027]` and always anti-phase, bob
+  ±0.03, blinks observed with the lid down to 0.12, and the rail points
+  identical before and after eight seconds of breathing.
 - **Run alongside the other branches:** worktree
   `~/repos/grok-bot-physics-racetrack`, port `4735`:
 
