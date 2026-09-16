@@ -13,6 +13,70 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `bowl` — bowl of bots
+
+Branched from `exploded` (head `67b86d6`), with the Sphere stage, the
+`sphere`/`outside` colours and the transparent Snapshot brought back from
+`nesting`. The round bot (`blob`) is hollowed to a thin wall and cut by one
+plane tilted toward the camera, leaving the lower part as a bowl standing on
+the Sphere floor with its eyes on the front; four smaller bots sit inside it,
+heads peeking over the rim. Nothing animates. Live at
+<https://monish-khara.github.io/grok-bot-physics/bowl/>.
+
+![Bowl of bots: the blue blob cut open with four bots peeking over the rim](docs/screenshot-bowl.png)
+
+- **Bowl** (`src/bowl.ts`): `bowl = (body − erode(body, thickness)) ∩ { n·p ≤ d }`,
+  built like the exploded view's half shells — analytic outer face, inside
+  pushed onto the `−thickness` level set, both plane-clipped, and the cut rim
+  as the annulus between the `sdf = 0` and `sdf = −thickness` contours on
+  the plane. Tones as on `exploded`: shell colour on the face, 25% lighter
+  rim, 25% darker inside. The plane passes through the body's axis at `cut
+  height` (fraction of the body's height) and tilts by `cut angle` toward the
+  camera, so from straight on the opening is an ellipse: the front lip dips
+  and the back rim rises, showing the inside wall. The bowl is 0.8 of the
+  Sphere's interior width (0.85 puts the back rim through the Sphere's arc at
+  the defaults).
+- **Eyes:** the blob's own pills, charted upright and as high as the cut
+  allows (the toolkit height when the plane clears them, otherwise just under
+  the front lip — at the default 30° cut the pills would otherwise be sliced
+  off); anything a slider pushes above the plane is clipped with it.
+- **Cast:** four distinct shapes drawn from the nine toolkit bodies other
+  than `blob`, in four distinct token colours none of which is the shell's,
+  from `seed`. Hand-placed slots in the bowl's frame — two in front (lower,
+  full size), two behind (further out, 0.9) — with seeded yaw and lean of
+  ±10°. Each bot is dropped until its first contact with the inner wall
+  (every sampled vertex inside the cavity via the body SDF), walking in
+  toward the axis if it is too wide for its slot, so nothing floats or pokes
+  through. `inner size` is the bot's visual size (mean of largest extent and
+  bounding radius) over the bowl's diameter.
+- **Leva:** `shell colour`, `cut angle (°)` (0–45, default 30), `cut height`
+  (0.45–0.8, default 0.62), `thickness` (0.045–0.15, default 0.06),
+  `inner size` (default 0.32), `seed`, `Respawn` (new seed → new shapes,
+  colours and jitter), `sphere`, `outside`, `Snapshot`, `snapshot include
+  outside`. `?seed=N` fixes the cast and the address bar tracks the current
+  seed; `?renderer=canvas2d` forces the fallback.
+- **Snapshot:** PNG of the Sphere with the scene, cropped to the shape,
+  transparent outside the truncated circle unless `snapshot include outside`
+  is on.
+- **Canvas 2D:** the bowl paints `perTriangle` (face, rim and inside groups
+  in the global depth sort); the inner bots are silhouettes slotted at their
+  depth. `docs/screenshot-bowl-canvas2d.png` is the same seed on that
+  renderer.
+- **Test hooks:** `window.__grokBowl()` (settings, plane, eye height, front
+  lip and back rim heights, per-bot slot, pose, top, peek above the lip and
+  wall clearance), `__grokBotBounds()`, `__grokScene()`, `__grokLastSnapshot`.
+- **Run alongside the other branches:** worktree
+  `~/repos/grok-bot-physics-bowl`, port `4738`:
+
+  ```bash
+  cd ~/repos/grok-bot-physics-bowl
+  npm install
+  npm run dev -- --host --port 4738 --strictPort
+  # → http://127.0.0.1:4738/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-bowl bash -lc 'cd ~/repos/grok-bot-physics-bowl && npm run dev -- --host --port 4738 --strictPort 2>&1 | tee /tmp/grok-bot-physics-bowl.log'`.
+
 ## This branch: `exploded` — exploded view
 
 Branched from `nesting` (head `372e7b3`). Four different bots nested inside
