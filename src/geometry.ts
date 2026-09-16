@@ -12,7 +12,7 @@ export const WORLD_PER_BODY = 0.68;
  * set for the Canvas 2D fallback, which projects every vertex on the CPU each
  * frame (it only fills silhouettes, so triangle count is not the limit).
  */
-export type Quality = "high" | "low";
+export type Quality = "high" | "low" | "sketch";
 
 type QualitySpec = {
   /** Marching-cubes grid resolution per axis. Only the rounded slabs (sparkle,
@@ -37,6 +37,9 @@ type QualitySpec = {
 const QUALITY: Record<Quality, QualitySpec> = {
   high: { mcRes: 128, radial: 192, profileSamples: 260, loftLevels: 72, ringStride: 1, boxSegments: 8, capsuleCaps: 32, eyeSegments: 24 },
   low: { mcRes: 96, radial: 96, profileSamples: 130, loftLevels: 48, ringStride: 1, boxSegments: 6, capsuleCaps: 16, eyeSegments: 16 },
+  // Lighter still, for scenes the Canvas 2D renderer paints triangle by
+  // triangle (the exploded view): a few thousand triangles per body.
+  sketch: { mcRes: 64, radial: 48, profileSamples: 60, loftLevels: 24, ringStride: 3, boxSegments: 4, capsuleCaps: 8, eyeSegments: 12 },
 };
 
 /** Body units are scaled by this to fit the [-1, 1] marching-cubes box. */
@@ -53,7 +56,7 @@ const EYE_BELOW = 0.04;
 const SDF_GRID = 256;
 const SDF_EXTENT = 1.3;
 
-type Sdf = (x: number, y: number, z: number) => number;
+export type Sdf = (x: number, y: number, z: number) => number;
 
 export type BotGeometry = {
   shape: BotShape;
@@ -604,6 +607,17 @@ export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): Bo
  * function are true offset curves of the shape. Also returns the outline
  * polygon when there is one.
  */
+/**
+ * A bot's 3D signed distance function in its own body units — the same one
+ * its mesh was built from (revolve profiles refitted the same way). The
+ * exploded view hollows bodies with it.
+ */
+export function botSdf(id: BotShape["id"]): Sdf {
+  const { body: rawBody } = BODIES[id];
+  const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
+  return bodySdf(body);
+}
+
 export function botSilhouette(id: BotShape["id"]): { sdf: (x: number, y: number) => number; outline: readonly Pt2[] | null } {
   const { body: rawBody } = BODIES[id];
   const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
