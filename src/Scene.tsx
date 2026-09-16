@@ -34,7 +34,7 @@ const OUTSIDE_COLOR = "#4a4a4a";
 /** The bowl's default token colour. */
 const SHELL_COLOR = TOKENS.blue;
 /** The bowl's width as a fraction of the Sphere's interior width. */
-const BOWL_WIDTH = 0.85;
+const BOWL_WIDTH = 0.8;
 /** The bowl is always the round bot. */
 const BOWL_SHAPE = "blob";
 
@@ -310,7 +310,7 @@ type BowlSettings = {
   cutHeight: number;
   /** Wall, fraction of the bowl's radius. */
   thickness: number;
-  /** Inner bot bounding radius as a fraction of the bowl's radius (slot scale on top). */
+  /** Inner bot size (largest extent) as a fraction of the bowl's diameter (slot scale on top). */
   innerSize: number;
   seed: number;
 };
@@ -352,7 +352,8 @@ function buildScene(bots: BotGeometry[], quality: Quality, sphere: Sphere, s: Bo
   const plane = cutPlane(s.cutAngle, s.cutHeight);
   const bowl = buildBowl(blob, bowlSdf, s.thickness, s.shellColor, quality, plane);
   const eyeShift = bowlEyeShift(plane, BOWL_SHAPE);
-  const eyes = buildBotEyes(BOWL_SHAPE, quality, { shiftY: eyeShift });
+  // Upright pills: charted low on the sphere, the default tangent frame would lean them.
+  const eyes = buildBotEyes(BOWL_SHAPE, quality, { shiftY: eyeShift, upright: true });
   bowl.eyes = clipEyes(eyes.eyes, plane, blob.scale);
   bowl.eyeNormals = eyes.eyeNormals;
 
@@ -365,12 +366,24 @@ function buildScene(bots: BotGeometry[], quality: Quality, sphere: Sphere, s: Bo
 
   const cast = pickCast(s.seed, s.shellColor).map((member) => {
     const bot = bots.find((b) => b.shape.id === member.shape)!;
-    const rBot = boundingRadius(bot.geometry);
-    const scale = (s.innerSize * member.slot.scale * radius) / rBot;
+    // `inner size` is the bot's visual size over the bowl's diameter: the mean
+    // of its largest extent and its bounding radius, so a wide body is not
+    // blown up to the height of a round one and a cube is not drawn with a
+    // face as tall as a sphere is round.
+    const extent = Math.max(bot.halfExtents.x, bot.halfExtents.y, bot.halfExtents.z);
+    const size = (extent + boundingRadius(bot.geometry)) / 2;
+    const scale = (s.innerSize * member.slot.scale * radius) / size;
     const rotation = new THREE.Euler(0, (member.yaw * Math.PI) / 180, (member.lean * Math.PI) / 180, "YXZ");
     const m = new THREE.Matrix4().makeRotationFromEuler(rotation);
-    const dropped = settle(bot.hullPoints, scale / radius, m, member.slot, bowlSdf, wall);
-    const position = new THREE.Vector3(member.slot.x, dropped.y, member.slot.z);
+    // A body too wide for its slot (a cube's corners, a wide tablet) is
+    // walked in toward the axis until it rests on the wall.
+    let slot = member.slot;
+    let dropped = settle(bot.hullPoints, scale / radius, m, slot, bowlSdf, wall);
+    for (let k = 0; k < 10 && !dropped.rests; k++) {
+      slot = { ...slot, x: slot.x * 0.85, z: slot.z * 0.85 };
+      dropped = settle(bot.hullPoints, scale / radius, m, slot, bowlSdf, wall);
+    }
+    const position = new THREE.Vector3(slot.x, dropped.y, slot.z);
     // Screen top and wall clearance of the posed bot, for the checks.
     const v = new THREE.Vector3();
     const pos = bot.geometry.attributes.position as THREE.BufferAttribute;
@@ -382,7 +395,7 @@ function buildScene(bots: BotGeometry[], quality: Quality, sphere: Sphere, s: Bo
       const d = bowlSdf(v.x, v.y, v.z) + wall;
       if (d > poke) poke = d;
     }
-    return { member, bot, scale, position, rotation, rests: dropped.rests, top, lip: frontLipAt(plane, member.slot.x), poke };
+    return { member, bot, scale, position, rotation, rests: dropped.rests, top, lip: frontLipAt(plane, slot.x), poke };
   });
   return { bowl, plane, eyeShift, radius, centre, bowlScale, wall, cast };
 }

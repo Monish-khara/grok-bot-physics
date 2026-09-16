@@ -540,6 +540,7 @@ function eyeGeometry(
   // Indexed with shared vertices so the Canvas 2D renderer can trace its silhouette.
   const g = mergeVertices(extruded, 1e-6);
   extruded.dispose();
+  g.clearGroups();
   // Local frame: pill height along the body's up as seen on the surface,
   // extrusion along the outward normal. `upright` instead picks the tangent
   // direction with no sideways component, so the height axis projects
@@ -578,6 +579,9 @@ export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): Bo
   const scale = WORLD_PER_BODY * eyes.size;
 
   const geometry = weld(bodyGeometry(body, sdf, q));
+  // Three's box builder leaves one group per face; a body is one material,
+  // and grouped geometry is what marks a hollow shell (face, rim, inside).
+  geometry.clearGroups();
   // Raycasting (taps, drags) culls back faces, so every body must wind outward.
   ensureOutwardWinding(geometry);
   geometry.computeVertexNormals();

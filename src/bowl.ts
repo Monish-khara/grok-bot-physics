@@ -243,10 +243,10 @@ export type Slot = { x: number; z: number; scale: number };
  * overlap a little from the front.
  */
 export const SLOTS: readonly Slot[] = [
-  { x: -0.3, z: 0.34, scale: 1 },
-  { x: 0.3, z: 0.4, scale: 1 },
-  { x: -0.46, z: -0.3, scale: 0.9 },
-  { x: 0.46, z: -0.38, scale: 0.9 },
+  { x: -0.26, z: 0.52, scale: 1 },
+  { x: 0.26, z: 0.55, scale: 1 },
+  { x: -0.55, z: -0.33, scale: 0.9 },
+  { x: 0.55, z: -0.36, scale: 0.9 },
 ];
 
 /** Largest seeded yaw and lean, degrees. */
