@@ -1,6 +1,6 @@
 name: GitHub Pages
 
-# One static site from seven branches:
+# One static site from eight branches:
 #   /            sphere    (the Sphere container, Drop | Fly)
 #   /drop/       master    (the original physics drop)
 #   /fly/        fly       (zero-gravity bounce)
@@ -15,7 +15,7 @@ name: GitHub Pages
 
 on:
   push:
-    branches: [master, sphere, fly, canvas2d, racetrack, nesting, exploded]
+    branches: [master, sphere, fly, canvas2d, racetrack, nesting, exploded, bowl]
   workflow_dispatch:
 
 permissions:
@@ -47,6 +47,8 @@ jobs:
             path: nesting/
           - branch: exploded
             path: exploded/
+          - branch: bowl
+            path: bowl/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,6 +97,10 @@ jobs:
         with:
           name: site-exploded
           path: site/exploded
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-bowl
+          path: site/bowl
       - name: Variants index
         run: |
           mkdir -p site/variants
@@ -129,6 +135,7 @@ jobs:
               <li><a href="../racetrack/"><b>Cloud Racetrack</b><span>the cloud in the Sphere with true offset-path track strokes and nine racers (branch <code>racetrack</code>)</span></a></li>
               <li><a href="../nesting/"><b>Russian Doll</b><span>hollow dome shells in the Sphere, each turning to show the next one through its window (branch <code>nesting</code>)</span></a></li>
               <li><a href="../exploded/"><b>Exploded View</b><span>four bots nested inside one another, split into half shells and slid apart along a diagonal (branch <code>exploded</code>)</span></a></li>
+              <li><a href="../bowl/"><b>Bowl of Bots</b><span>the round bot hollowed and cut open like a bowl in the Sphere, four smaller bots sitting in it (branch <code>bowl</code>)</span></a></li>
             </ul>
           </main>
           </body>
