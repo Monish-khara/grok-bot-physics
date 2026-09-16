@@ -50,8 +50,27 @@ export const Figure = forwardRef<THREE.Group, Props>(function Figure(
     () => new THREE.MeshBasicMaterial({ color: vertexColors ? "#ffffff" : color, vertexColors, toneMapped: false }),
     [color, vertexColors],
   );
+  // A grouped geometry (the half shells: face, rim, inside) draws its rim
+  // pushed back a little in depth, so faces win ties along shared edges.
+  const grouped = bot.geometry.groups.length > 1;
+  const biased = useMemo(
+    () =>
+      grouped
+        ? new THREE.MeshBasicMaterial({
+            color: vertexColors ? "#ffffff" : color,
+            vertexColors,
+            toneMapped: false,
+            polygonOffset: true,
+            polygonOffsetFactor: 4,
+            polygonOffsetUnits: 16,
+          })
+        : null,
+    [color, vertexColors, grouped],
+  );
+  const bodyMaterial = useMemo(() => (biased ? [material, biased, material] : material), [material, biased]);
   const eyeMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: EYE_COLOR, toneMapped: false }), []);
   useEffect(() => () => material.dispose(), [material]);
+  useEffect(() => () => biased?.dispose(), [biased]);
   useEffect(() => () => eyeMaterial.dispose(), [eyeMaterial]);
 
   const ghostCount = blur > 0 ? BLUR_COPIES : 0;
@@ -113,7 +132,7 @@ export const Figure = forwardRef<THREE.Group, Props>(function Figure(
         <mesh
           ref={meshRef}
           geometry={bot.geometry}
-          material={material}
+          material={bodyMaterial}
           scale={scale}
           userData={{ perTriangle }}
           onPointerDown={onPointerDown}

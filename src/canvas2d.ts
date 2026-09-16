@@ -363,23 +363,34 @@ export class Canvas2DRenderer {
   private triOrder: number[] = [];
   private viewXYZ = new Map<THREE.BufferGeometry, Float32Array>();
   private triColorCache = new Map<THREE.BufferGeometry, string[] | null>();
+  private mvp2 = new THREE.Matrix4();
+  /** Nearest view depth of the body gathered last, for placing its eyes. */
+  private nearest = -Infinity;
 
   /**
-   * Painter's algorithm per triangle for bodies you can see into (the
-   * nesting shells): every front-facing triangle of every `perTriangle` body
-   * and of its camera-facing eyes goes into one list, sorted far to near by
-   * view depth, and is filled with its own colour — the geometry's vertex
-   * colour (one flat tone per triangle) or the material colour. Ordinary
-   * silhouette bodies are slotted into the same order at their centre depth,
-   * so a solid core inside the shells paints after their back walls and
-   * before their front walls. Runs of one colour are merged into a single
-   * path, so the fill count is a few hundred, not the triangle count.
+   * Painter's algorithm per triangle for bodies you can see into (hollow
+   * shells): every front-facing triangle of every `perTriangle` body goes
+   * into one list, sorted far to near by view depth, and is filled with its
+   * own colour — the geometry's vertex colour (one flat tone per triangle) or
+   * the material colour. Depth is quantised into thin slabs (world units)
+   * with the colour as tie-break, so one surface paints as one run even
+   * where an occluded surface behind it interleaves in depth. Geometry groups
+   * beyond the first are a body's rim and inside (see halfShell.ts): they are
+   * biased a little farther back so the face of the same piece always wins
+   * where centroid depths would tie. Eyes and ordinary silhouette bodies are
+   * single path items slotted into the same order at their own depth (eyes a
+   * little forward of the face they sit in), so an eye is one clean fill and
+   * a solid core paints after the shells' back walls and before their front
+   * walls. Runs of one colour merge into a single path, and every triangle is
+   * grown half a pixel by edge offset so abutting fills leave no hairlines.
    */
   private paintTriangles(ctx: CanvasRenderingContext2D, camera: THREE.Camera, bodies: BodyFrame[], meshes: THREE.Mesh[], blur: number) {
     const xy = this.triXY, depth = this.triDepth, color = this.triColor;
     xy.length = depth.length = color.length = 0;
+    const items: BodyFrame[] = [...bodies];
     for (const mesh of meshes) {
-      this.gatherTriangles(mesh, camera, 0);
+      this.gatherTriangles(mesh, camera);
+      const nearest = this.nearest;
       for (const child of mesh.children) {
         const eye = child as THREE.Mesh;
         if (!eye.isMesh || !eye.visible || !isDrawable(eye.material)) continue;
@@ -389,29 +400,21 @@ export class Canvas2DRenderer {
           this.tmpN.copy(local).applyMatrix3(this.normalMatrix).normalize();
           if (this.tmpN.dot(this.toCamera) < 0.15) continue;
         }
-        // The pill's lip stands 0.025 body units proud of the face; a bias a
-        // little larger than that puts every eye triangle after the face
-        // triangles it sits in.
-        this.tmpV.setFromMatrixColumn(eye.matrixWorld, 0);
-        this.gatherTriangles(eye, camera, 0.06 * this.tmpV.length());
+        const path = this.buildPath(eye);
+        if (!path) continue;
+        // An eye sits on its body's outer face, so nothing of that body can be
+        // in front of it: paint it just after the body's nearest triangle.
+        // Anything else that covers the eye is nearer than that point too.
+        items.push({ mesh: eye, depth: nearest + 1e-4, path, color: colorOf(eye.material), alpha: 1, eyes: [] });
       }
     }
+    items.sort((a, b) => a.depth - b.depth);
+
     const n = depth.length;
     const order = this.triOrder;
     order.length = n;
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < n; i++) {
-      order[i] = i;
-      if (depth[i] < lo) lo = depth[i];
-      if (depth[i] > hi) hi = depth[i];
-    }
-    // Depth is quantised into thin slabs and ties broken by colour, so
-    // triangles of one surface that interleave in depth with an occluded
-    // surface behind it (the next shell's face) still paint as one run —
-    // hundreds of fills instead of thousands, and far fewer seams. A slab
-    // is well under the gap between two shells or a wall's thickness.
-    const slab = (hi - lo) / DEPTH_SLABS || 1;
-    const key = (i: number) => Math.floor((depth[i] - lo) / slab);
+    for (let i = 0; i < n; i++) order[i] = i;
+    const key = (i: number) => Math.floor(depth[i] / DEPTH_SLAB);
     order.sort((a, b) => key(a) - key(b) || (color[a] < color[b] ? -1 : color[a] > color[b] ? 1 : 0) || depth[a] - depth[b]);
     this.phases.triangles += n;
 
@@ -428,10 +431,10 @@ export class Canvas2DRenderer {
     for (let k = 0; k < n; k++) {
       const i = order[k];
       const d = depth[i];
-      while (bi < bodies.length && bodies[bi].depth <= d) {
+      while (bi < items.length && items[bi].depth <= d) {
         flush();
         current = "";
-        this.paintBody(ctx, bodies[bi++], blur);
+        this.paintBody(ctx, items[bi++], blur);
       }
       if (!path || color[i] !== current) {
         flush();
@@ -445,11 +448,11 @@ export class Canvas2DRenderer {
       path.closePath();
     }
     flush();
-    while (bi < bodies.length) this.paintBody(ctx, bodies[bi++], blur);
+    while (bi < items.length) this.paintBody(ctx, items[bi++], blur);
   }
 
   /** Project a mesh and append its front-facing triangles to the painter's list. */
-  private gatherTriangles(mesh: THREE.Mesh, camera: THREE.Camera, bias: number) {
+  private gatherTriangles(mesh: THREE.Mesh, camera: THREE.Camera) {
     const geometry = mesh.geometry;
     const position = geometry.attributes.position as THREE.BufferAttribute | undefined;
     if (!position) return;
@@ -465,13 +468,16 @@ export class Canvas2DRenderer {
     // View-space z for the depth: row 3 of view × world.
     const mv = this.mvp2.multiplyMatrices(camera.matrixWorldInverse, mesh.matrixWorld).elements;
     const src = position.array as ArrayLike<number>;
+    let nearest = -Infinity;
     for (let i = 0, j = 0; i < count; i++, j += 3) {
       const x = src[j], y = src[j + 1], z = src[j + 2];
       const w = e[3] * x + e[7] * y + e[11] * z + e[15] || 1;
       v[j] = ((e[0] * x + e[4] * y + e[8] * z + e[12]) / w + 1) * 0.5 * width;
       v[j + 1] = (1 - (e[1] * x + e[5] * y + e[9] * z + e[13]) / w) * 0.5 * height;
       v[j + 2] = mv[2] * x + mv[6] * y + mv[10] * z + mv[14];
+      if (v[j + 2] > nearest) nearest = v[j + 2];
     }
+    this.nearest = nearest;
 
     let colors = this.triColorCache.get(geometry);
     if (colors === undefined) {
@@ -481,6 +487,17 @@ export class Canvas2DRenderer {
     const flat = colors ? "" : colorOf(mesh.material);
     const index = geometry.getIndex();
     const triCount = index ? index.count / 3 : count / 3;
+    // Group biases (rim, inside) in world units: fractions of the body's world radius.
+    let groupBias: { from: number; bias: number }[] | null = null;
+    if (geometry.groups.length > 1) {
+      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+      this.tmpV.setFromMatrixColumn(mesh.matrixWorld, 0);
+      const radius = (geometry.boundingSphere?.radius ?? 1) * this.tmpV.length();
+      groupBias = geometry.groups
+        .filter((g) => g.materialIndex && g.materialIndex > 0)
+        .map((g) => ({ from: g.start / 3, bias: -GROUP_BIAS[Math.min(g.materialIndex ?? 0, GROUP_BIAS.length - 1)] * radius }))
+        .sort((a, b) => a.from - b.from);
+    }
     const xy = this.triXY, depth = this.triDepth, color = this.triColor;
     for (let t = 0; t < triCount; t++) {
       const a = (index ? index.getX(t * 3) : t * 3) * 3;
@@ -488,24 +505,16 @@ export class Canvas2DRenderer {
       const c = (index ? index.getX(t * 3 + 2) : t * 3 + 2) * 3;
       const ax = v[a], ay = v[a + 1], bx = v[b], by = v[b + 1], cx = v[c], cy = v[c + 1];
       // Screen y points down: a front-facing (CCW in NDC) triangle has negative area here.
-      if ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay) >= 0) continue;
-      // Grow each triangle half a pixel about its centroid: abutting fills
-      // from different runs would otherwise leave anti-aliased hairlines.
-      const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3;
-      const grow = (x: number, y: number, k: number) => {
-        const dx = x - mx, dy = y - my;
-        const len = Math.hypot(dx, dy) || 1;
-        xy.push(x + (dx / len) * DILATE_PX, y + (dy / len) * DILATE_PX);
-        return k;
-      };
-      grow(ax, ay, 0);
-      grow(bx, by, 1);
-      grow(cx, cy, 2);
+      const area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+      if (area >= 0) continue;
+      let bias = 0;
+      if (groupBias) for (const g of groupBias) if (t >= g.from) bias = g.bias;
+      dilate(xy, ax, ay, bx, by, cx, cy);
       depth.push((v[a + 2] + v[b + 2] + v[c + 2]) / 3 + bias);
       color.push(colors ? colors[t] : flat);
     }
   }
-  private mvp2 = new THREE.Matrix4();
+
 
   /**
    * Fill the projection of a mesh's front-facing triangles as one path. Rather
@@ -815,9 +824,39 @@ const BLUR_MAX_COPIES = 8;
 const BLUR_STEP_PX = 8;
 /** Opacity of the blur copy nearest the body. */
 const BLUR_ALPHA = 0.5;
-/** Painter: depth slabs across the frame's depth range, and the per-triangle growth in CSS px. */
-const DEPTH_SLABS = 200;
+/** Painter: depth slab (world units, well under a shell wall) and the per-triangle growth in CSS px. */
+const DEPTH_SLAB = 0.004;
 const DILATE_PX = 0.5;
+/** Painter: how far back (fraction of the body's world radius) each geometry group beyond the first is pushed. */
+const GROUP_BIAS = [0, 0.08, 0.3];
+
+/**
+ * Append a triangle grown by `DILATE_PX` along its edge normals (a true
+ * offset, so thin slivers widen too), each corner's move capped so acute
+ * corners do not shoot off.
+ */
+function dilate(out: number[], ax: number, ay: number, bx: number, by: number, cx: number, cy: number) {
+  // Outward normal of edge p→q, i.e. away from the third corner r.
+  const normal = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) => {
+    let nx = qy - py, ny = px - qx;
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len; ny /= len;
+    if (nx * (rx - px) + ny * (ry - py) > 0) { nx = -nx; ny = -ny; }
+    return [nx, ny];
+  };
+  const [abx, aby] = normal(ax, ay, bx, by, cx, cy);
+  const [bcx, bcy] = normal(bx, by, cx, cy, ax, ay);
+  const [cax, cay] = normal(cx, cy, ax, ay, bx, by);
+  const corner = (x: number, y: number, n1x: number, n1y: number, n2x: number, n2y: number) => {
+    let mx = n1x + n2x, my = n1y + n2y;
+    const k = DILATE_PX / Math.max(0.35, 1 + n1x * n2x + n1y * n2y);
+    mx *= k; my *= k;
+    out.push(x + mx, y + my);
+  };
+  corner(ax, ay, cax, cay, abx, aby);
+  corner(bx, by, abx, aby, bcx, bcy);
+  corner(cx, cy, bcx, bcy, cax, cay);
+}
 
 type BodyFrame = {
   mesh: THREE.Mesh;
