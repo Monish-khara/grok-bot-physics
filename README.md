@@ -53,12 +53,17 @@ No Sphere container, no cascade. Live at
   ties along the shared cut edge (otherwise the lighter rim bleeds into the
   seam at explode 0). The core is the solid `teardrop`. Eyes are each bot's
   own pills on its front half and on the core.
-- **View:** orthographic camera straight on; the assembly group is turned
-  yaw 42°, pitch 28° (a little more across the axis than the classic 35/25,
-  so a front half's face — which points up the axis at the next, larger,
-  nearer piece — is not covered by it), which puts the axis lower-left to
-  upper-right on screen with the front halves nearer. Plain page colour
-  behind a transparent canvas (`background` picker, default `#0b0b0b`).
+- **View:** orthographic camera straight on, framed once to the assembly's
+  projected bounds at explode 1 (every piece's vertices, exact) with an 8%
+  margin — static, so nothing zooms while the slider moves — and, on
+  viewports wide enough for the open Leva panel (≥ 720 px), inside the part
+  of the viewport left of a 300 px gutter so the panel never covers a piece.
+  The assembly group is turned yaw 42°, pitch 28° (a little more across the
+  axis than the classic 35/25, so a front half's face — which points up the
+  axis at the next, larger, nearer piece — is not covered by it), which puts
+  the axis lower-left to upper-right on screen with the front halves nearer.
+  Plain page colour behind a transparent canvas (`background` picker,
+  default `#0b0b0b`).
 - **Explode:** order along the axis back L0, back L1, back L2, core, front
   L2, front L1, front L0; each piece's full offset is the sum of the gaps
   outward of it, a gap being 1.8 × that layer's radius (so the stack reads
@@ -81,10 +86,11 @@ No Sphere container, no cascade. Live at
   `background`, `Snapshot`, `snapshot in tab`. Nothing else.
   `?renderer=canvas2d` forces the fallback.
 - **Test hooks:** `window.__grokExploded()` (explode and eased value,
-  quality, per-layer radii and fit results, every piece's offset, current
-  slide, triangle count and world position), `__grokScene()`. Verified
-  headless at 1200×900 with SwiftShader WebGL and with the Canvas 2D
-  renderer at explode 0, 0.5 and 1: a closed sphere with eyes at 0 (no seam
+  quality, the framing bounds, per-layer radii and fit results, every
+  piece's offset, current slide, triangle count and world position),
+  `__grokScene()`. Verified headless at 1200×900 and 900×1200 with
+  SwiftShader WebGL and with the Canvas 2D renderer at explode 0, 0.5 and 1
+  (whole assembly in frame, clear of the panel, at both sizes): a closed sphere with eyes at 0 (no seam
   at the cut); at 0.5 the inner bots visible and correctly nested in the
   back halves' cavities; at 1 all seven pieces separated with clear
   cavities, lighter cut rims, darker insides, eyes on every front half and

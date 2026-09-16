@@ -10,14 +10,16 @@ import type { ShapeId } from "./data/shapes";
 import { StatusOverlay, detectWebGL, useGlobalErrors } from "./Status";
 import { boundingRadius, buildHalfShells } from "./halfShell";
 
-/** World units visible top-to-bottom; width follows the aspect ratio. */
-const VIEW_HEIGHT = 10;
 /** Default page colour: near black, like the reference. */
 const BACKGROUND = "#0b0b0b";
-/** Bounding radius of the outer bot, world units. */
+/** Bounding radius of the outer bot, world units (the camera frames the assembly, so this only sets the scale). */
 const OUTER_RADIUS = 1.6;
-/** Where the assembly sits (the Leva panel covers the right edge). */
-const CENTRE = new THREE.Vector3(-1.38, -0.15, 0);
+/** Where the assembly sits. */
+const CENTRE = new THREE.Vector3(0, 0, 0);
+/** Framing: margin around the assembly's explode-1 bounds, and the strip the Leva panel covers on wide viewports. */
+const FRAME_MARGIN = 0.08;
+const LEVA_GUTTER_PX = 300;
+const LEVA_COLLAPSE_PX = 720;
 /**
  * 3/4 view: the assembly (which faces +z) is turned so its axis runs lower-left
  * to upper-right and toward the camera. A little more across the axis than
@@ -63,16 +65,34 @@ const smoothstep = (p: number) => {
   return e * e * (3 - 2 * e);
 };
 
-/** Orthographic camera straight down -Z; VIEW_HEIGHT world units fill the viewport height. */
-function CameraRig() {
+/** Screen-plane bounds of the assembly, world units (the camera looks down -Z, so x and y project as they are). */
+type Bounds = { minX: number; maxX: number; minY: number; maxY: number };
+
+/**
+ * Orthographic camera straight down -Z, framed once to the assembly's bounds
+ * at explode 1 with FRAME_MARGIN around them (static, so nothing zooms while
+ * the slider moves), inside the part of the viewport the Leva panel does not
+ * cover: on viewports wide enough for the open panel, the right
+ * LEVA_GUTTER_PX are left free and the assembly is centred in the rest.
+ */
+function CameraRig({ bounds }: { bounds: Bounds }) {
   const { camera, size } = useThree();
   useLayoutEffect(() => {
     const cam = camera as THREE.OrthographicCamera;
-    cam.position.set(0, 0, 40);
+    const gutter = size.width >= LEVA_COLLAPSE_PX ? LEVA_GUTTER_PX : 0;
+    const usableW = Math.max(1, size.width - gutter);
+    const w = (bounds.maxX - bounds.minX) * (1 + 2 * FRAME_MARGIN);
+    const h = (bounds.maxY - bounds.minY) * (1 + 2 * FRAME_MARGIN);
+    const zoom = Math.min(usableW / w, size.height / h);
+    // The content centre lands in the middle of the usable area: the camera
+    // centre is half a gutter to the right of it.
+    const cx = (bounds.minX + bounds.maxX) / 2 + gutter / 2 / zoom;
+    const cy = (bounds.minY + bounds.maxY) / 2;
+    cam.position.set(cx, cy, 40);
     cam.rotation.set(0, 0, 0);
-    cam.zoom = size.height / VIEW_HEIGHT;
+    cam.zoom = zoom;
     cam.updateProjectionMatrix();
-  }, [camera, size.height]);
+  }, [camera, size.width, size.height, bounds]);
   return null;
 }
 
@@ -264,6 +284,29 @@ function buildPieces(bots: BotGeometry[], quality: Quality): { pieces: Piece[]; 
   return { pieces, fits, radii };
 }
 
+/** The assembly's rotation to the 3/4 view. */
+const ASSEMBLY_EULER = new THREE.Euler((-PITCH_DEG * Math.PI) / 180, (YAW_DEG * Math.PI) / 180, 0, "YXZ");
+
+/** Screen-plane bounds of every piece's vertices at explode 1 (exact, computed once per build). */
+function assemblyBounds(pieces: Piece[]): Bounds {
+  const m = new THREE.Matrix4().makeRotationFromEuler(ASSEMBLY_EULER);
+  const b: Bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  const v = new THREE.Vector3();
+  for (const p of pieces) {
+    const pos = p.bot.geometry.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).multiplyScalar(p.scale);
+      v.z += p.offset;
+      v.applyMatrix4(m).add(CENTRE);
+      if (v.x < b.minX) b.minX = v.x;
+      if (v.x > b.maxX) b.maxX = v.x;
+      if (v.y < b.minY) b.minY = v.y;
+      if (v.y > b.maxY) b.maxY = v.y;
+    }
+  }
+  return b;
+}
+
 /**
  * The assembly: seven pieces on one axis (the bots' +z), the whole group
  * turned to the 3/4 view. `explode` slides each piece along the axis by its
@@ -284,7 +327,7 @@ function Assembly({
     const a = assembly.current;
     if (a) {
       a.position.copy(CENTRE);
-      a.rotation.set((-PITCH_DEG * Math.PI) / 180, (YAW_DEG * Math.PI) / 180, 0, "YXZ");
+      a.rotation.copy(ASSEMBLY_EULER);
     }
     const e = smoothstep(explode);
     for (let i = 0; i < pieces.length; i++) {
@@ -350,6 +393,7 @@ function Framed({
   );
   const groups = useRef<(THREE.Group | null)[]>([]);
   const scene = useThree((s) => s.scene);
+  const frame = useMemo(() => assemblyBounds(built.pieces), [built]);
 
   const bounds = useRef<() => THREE.Box3 | null>(() => null);
   useEffect(() => {
@@ -386,6 +430,7 @@ function Framed({
       explode,
       eased: smoothstep(explode),
       quality,
+      frame,
       radii: built.radii,
       fits: built.fits,
       pieces: built.pieces.map((p, i) => {
@@ -402,11 +447,11 @@ function Framed({
         };
       }),
     });
-  }, [scene, built, explode, quality]);
+  }, [scene, built, explode, quality, frame]);
 
   return (
     <>
-      <CameraRig />
+      <CameraRig bounds={frame} />
       <Snapshot boundsRef={bounds} captureRef={captureRef} openInTab={snapshotInTab} />
       {renderer === "canvas2d" ? <Canvas2DStage /> : null}
       <Assembly pieces={built.pieces} explode={explode} groupsRef={groups} />
