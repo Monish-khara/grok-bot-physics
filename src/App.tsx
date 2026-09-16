@@ -10,10 +10,10 @@ export default function App() {
         <Scene />
       </SceneErrorBoundary>
       <header className="hud">
-        <h1>Grok Bots · Exploded View</h1>
-        <p>Four bots nested inside one another, each outer one a hollow shell split in two. Slide explode to take them apart.</p>
+        <h1>Grok Bots · Bowl of Bots</h1>
+        <p>The round bot hollowed out and cut open like a bowl, with four smaller bots sitting in it. Respawn for a new cast.</p>
       </header>
-      <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Exploded" }} />
+      <Leva collapsed={window.innerWidth < 720} titleBar={{ title: "Bowl" }} />
     </div>
   );
 }

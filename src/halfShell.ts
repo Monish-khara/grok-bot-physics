@@ -31,14 +31,14 @@ export function shellTones(color: string): ShellTones {
   return { face: `#${c.getHexString()}`, rim: `#${rim.getHexString()}`, inside: `#${inside.getHexString()}` };
 }
 
-type Part = "face" | "rim" | "inside";
+export type Part = "face" | "rim" | "inside";
 /** Geometry group / material indices (see `buildHalfShells`). */
 export const RIM_GROUP = 1;
 export const INSIDE_GROUP = 2;
-type Tri = [number, number, number, number, number, number, number, number, number];
+export type Tri = [number, number, number, number, number, number, number, number, number];
 
 /** Rim segments around the cut. */
-const RIM_SEGMENTS: Record<Quality, number> = { high: 256, low: 128, sketch: 72 };
+export const RIM_SEGMENTS: Record<Quality, number> = { high: 256, low: 128, sketch: 72 };
 /**
  * Each half's outer face runs this far past the cut plane (fraction of the
  * bounding radius). Assembled, the two lips overlap on the same surface in
@@ -91,7 +91,7 @@ function flip(tris: Tri[]): Tri[] {
 }
 
 /** The mesh as a flat triangle list in body units (positions divided by `scale`). */
-function triangleList(geometry: THREE.BufferGeometry, scale: number): Tri[] {
+export function triangleList(geometry: THREE.BufferGeometry, scale: number): Tri[] {
   const pos = geometry.attributes.position as THREE.BufferAttribute;
   const index = geometry.getIndex();
   const count = index ? index.count : pos.count;
@@ -114,7 +114,7 @@ function triangleList(geometry: THREE.BufferGeometry, scale: number): Tri[] {
  * `t`, then pulled onto the sdf = −t level set with a few Newton steps so the
  * wall is `t` thick wherever the offset is well defined.
  */
-function innerSurface(geometry: THREE.BufferGeometry, scale: number, sdf: Sdf, t: number): Tri[] {
+export function innerSurface(geometry: THREE.BufferGeometry, scale: number, sdf: Sdf, t: number): Tri[] {
   const pos = geometry.attributes.position as THREE.BufferAttribute;
   let normal = geometry.attributes.normal as THREE.BufferAttribute | undefined;
   if (!normal) {
@@ -209,7 +209,7 @@ export function boundingRadius(geometry: THREE.BufferGeometry): number {
   return Math.sqrt(r2);
 }
 
-function bake(tris: Tri[], parts: Part[], tones: ShellTones, scale: number): THREE.BufferGeometry {
+export function bake(tris: Tri[], parts: Part[], tones: ShellTones, scale: number): THREE.BufferGeometry {
   const positions = new Float32Array(tris.length * 9);
   const colors = new Float32Array(tris.length * 9);
   const c = new THREE.Color();

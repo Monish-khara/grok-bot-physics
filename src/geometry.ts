@@ -601,6 +601,26 @@ export function buildBotGeometry(shape: BotShape, quality: Quality = "high"): Bo
 }
 
 /**
+ * A bot's eye pills alone, in world units in the body's frame, with any
+ * formation fields overridden (the bowl charts its eyes lower so they clear
+ * the cut). Same construction as `buildBotGeometry`.
+ */
+export function buildBotEyes(
+  id: BotShape["id"],
+  quality: Quality,
+  overrides: Partial<EyeFormation> = {},
+): { eyes: THREE.BufferGeometry[]; eyeNormals: THREE.Vector3[] } {
+  const q = QUALITY[quality];
+  const { body: rawBody, eyes } = BODIES[id];
+  const body: BodyDef = rawBody.kind === "revolve" ? { ...rawBody, profile: smoothProfile(rawBody.profile) } : rawBody;
+  const sdf = bodySdf(body);
+  const scale = WORLD_PER_BODY * eyes.size;
+  const parts = eyeGeometries(sdf, { ...eyes, ...overrides }, q);
+  for (const { geometry: g } of parts) g.scale(scale, scale, scale);
+  return { eyes: parts.map((e) => e.geometry), eyeNormals: parts.map((e) => e.normal) };
+}
+
+/**
  * Exact signed distance to a bot's front silhouette in its own body units,
  * i.e. its 3D SDF on the plane z = 0. Lofts and slabs are the drawn outline
  * itself (not the gridded copy the 3D fill uses), so iso-lines of this
