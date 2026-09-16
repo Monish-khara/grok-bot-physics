@@ -13,6 +13,96 @@ and spun.
 Built with Vite, React, TypeScript, three.js, React Three Fiber, drei, Rapier
 (`@react-three/rapier`) and Leva.
 
+## This branch: `exploded` — exploded view
+
+Branched from `nesting` (head `372e7b3`). Four different bots nested inside
+one another — the sphere (`blob`), the `cloud`, the `tablet` and a
+`teardrop` core — each outer one a hollow shell split into a front and a back
+half, shown in a 3/4 view on a plain dark field like a product exploded
+diagram. One `explode` slider slides the seven pieces apart along a diagonal.
+No Sphere container, no cascade. Live at
+<https://monish-khara.github.io/grok-bot-physics/exploded/>.
+
+![Exploded view at 1: seven pieces along the diagonal, cavities and cut rims showing](docs/screenshot-exploded.png)
+
+- **Pieces** (`buildPieces` in `src/Scene.tsx`): outer to core, `blob`
+  (blue, size 1), `cloud` (green, 0.68), `tablet` (yellow, 0.46),
+  `teardrop` (red, 0.3), sizes as bounding radius over the outer's (1.6
+  world units). Each size is capped so every vertex of the body sits at
+  least a wall thickness inside the body around it, found by bisection on
+  the outer body's SDF (`maxFitScale`), with 8% clearance: the cloud fits
+  at 0.68 (limit 0.94), the tablet at 0.433 (limit 0.47, its own depth is
+  what limits it inside the cloud), the teardrop at 0.235 (limit 0.255 —
+  the tablet's round cavity is only 0.59 of its length across). The fit
+  results are in `window.__grokExploded().fits`.
+- **Half shells** (`src/halfShell.ts`): `shell = body − erode(body, 0.06 R)`,
+  split at `z = 0` in the bot's own frame (+z is the direction it faces and
+  also the explode axis, so the cut is perpendicular to the slide and the
+  eyes stay on the front half). Built from the body's mesh rather than by
+  re-sampling its SDF: the outer face is the toolkit shape's own analytic
+  mesh; the inside is that mesh pushed inward along its vertex normals and
+  Newton-snapped onto the SDF's `−thickness` level set; both are
+  plane-clipped (the face runs a hair past the cut so it, not the rim, is
+  what anti-aliases along the seam); the flat cut rim is the annulus between
+  the body's `sdf = 0` and `sdf = −thickness` contours on the plane,
+  ray-marched per angle (all four bodies are star-shaped about their
+  centre). Tones as on `nesting`, one flat colour per triangle baked as
+  vertex colours: token colour on the face, 25% toward white on the cut
+  rim, 25% toward black inside. Face, rim and inside are three geometry
+  groups; WebGL draws the rim with a polygon offset so the face wins depth
+  ties along the shared cut edge (otherwise the lighter rim bleeds into the
+  seam at explode 0). The core is the solid `teardrop`. Eyes are each bot's
+  own pills on its front half and on the core.
+- **View:** orthographic camera straight on; the assembly group is turned
+  yaw 42°, pitch 28° (a little more across the axis than the classic 35/25,
+  so a front half's face — which points up the axis at the next, larger,
+  nearer piece — is not covered by it), which puts the axis lower-left to
+  upper-right on screen with the front halves nearer. Plain page colour
+  behind a transparent canvas (`background` picker, default `#0b0b0b`).
+- **Explode:** order along the axis back L0, back L1, back L2, core, front
+  L2, front L1, front L0; each piece's full offset is the sum of the gaps
+  outward of it, a gap being 1.8 × that layer's radius (so the stack reads
+  evenly and no piece overlaps another at 1); the slide is
+  `offset × smoothstep(explode)`. At 0 a single closed sphere bot with eyes;
+  at 1 seven separated pieces with cavities, cut rims and eyes on every
+  front and on the core.
+- **Snapshot:** the assembly as drawn, on transparent, cropped to the
+  pieces' projected bounds (both renderers already draw onto a transparent
+  canvas). `snapshot in tab` as before.
+- **Canvas 2D** (`src/canvas2d.ts`): all seven pieces are `perTriangle`
+  (the core too, so the painter's order holds in the 3/4 view) at the new
+  `sketch` mesh quality (~12k painted triangles, ~8 ms a frame at 1200×900).
+  The painter now quantises depth in fixed world-unit slabs, pushes each
+  body's rim and inside groups behind its face, paints each eye as one
+  silhouette path just after its body's nearest triangle (nothing of a body
+  can be in front of its own eye), and grows triangles by a true edge
+  offset so thin slivers close up too.
+- **Leva:** `explode` (0–1, default 0.6; `?explode=` presets it),
+  `background`, `Snapshot`, `snapshot in tab`. Nothing else.
+  `?renderer=canvas2d` forces the fallback.
+- **Test hooks:** `window.__grokExploded()` (explode and eased value,
+  quality, per-layer radii and fit results, every piece's offset, current
+  slide, triangle count and world position), `__grokScene()`. Verified
+  headless at 1200×900 with SwiftShader WebGL and with the Canvas 2D
+  renderer at explode 0, 0.5 and 1: a closed sphere with eyes at 0 (no seam
+  at the cut); at 0.5 the inner bots visible and correctly nested in the
+  back halves' cavities; at 1 all seven pieces separated with clear
+  cavities, lighter cut rims, darker insides, eyes on every front half and
+  the core, no piece overlapping another, no z-fighting on the cut faces;
+  no console errors.
+- **Run alongside the other branches:** worktree
+  `~/repos/grok-bot-physics-exploded`, port `4737`:
+
+  ```bash
+  cd ~/repos/grok-bot-physics-exploded
+  npm install
+  npm run dev -- --port 4737 --strictPort
+  # → http://127.0.0.1:4737/
+  ```
+
+  Or detached: `screen -dmS grok-bot-physics-exploded bash -lc 'cd ~/repos/grok-bot-physics-exploded && npm run dev -- --port 4737 --strictPort 2>&1 | tee /tmp/grok-bot-physics-exploded.log'`.
+- Rapier is still unused here (the dependency remains in `package.json`).
+
 ## This branch: `nesting` — Russian doll shells
 
 Branched from `racetrack` (head `badf622`). The Sphere, its colours and the
